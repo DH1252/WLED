@@ -45,7 +45,27 @@
 #define ENCODER_SW_PIN 19
 #endif
 
-// The last UI state, remove color and saturation option if diplay not active(too many options)
+#ifndef ENCODER_MAX_DELAY_MS    // max delay between polling encoder pins
+#define ENCODER_MAX_DELAY_MS 8  // 8 milliseconds => max 120 change impulses in 1 second, for full turn of a 30/30 encoder (4 changes per segment, 30 segments for one turn)
+#endif
+
+#ifndef USERMOD_USE_PCF8574
+  #undef USE_PCF8574
+  #define USE_PCF8574 false
+#else
+  #undef USE_PCF8574
+  #define USE_PCF8574 true
+#endif
+
+#ifndef PCF8574_ADDRESS
+  #define PCF8574_ADDRESS 0x20  // some may start at 0x38
+#endif
+
+#ifndef PCF8574_INT_PIN
+  #define PCF8574_INT_PIN -1    // GPIO connected to INT pin on PCF8574
+#endif
+
+// The last UI state, remove color and saturation option if display not active (too many options)
 #ifdef USERMOD_FOUR_LINE_DISPLAY
  #define LAST_UI_STATE 11
 #else
@@ -113,233 +133,266 @@ static int re_qstringCmp(const void *ap, const void *bp) {
 }
 
 
+static volatile uint8_t pcfPortData = 0;                // port expander port state
+static volatile uint8_t addrPcf8574 = PCF8574_ADDRESS;  // has to be accessible in ISR
+
+// Interrupt routine to read I2C rotary state
+// if we are to use PCF8574 port expander we will need to rely on interrupts as polling I2C every 2ms
+// is a waste of resources and causes 4LD to fail.
+// in such case rely on ISR to read pin values and store them into static variable
+static void IRAM_ATTR i2cReadingISR() {
+  Wire.requestFrom(addrPcf8574, 1U);
+  if (Wire.available()) {
+    pcfPortData = Wire.read();
+  }
+}
+
+
 class RotaryEncoderUIUsermod : public Usermod {
-private:
-  int8_t fadeAmount = 5;              // Amount to change every step (brightness)
-  unsigned long loopTime = 0;
 
-  unsigned long buttonPressedTime = 0;
-  unsigned long buttonWaitTime = 0;
-  bool buttonPressedBefore = false;
-  bool buttonLongPressed = false;
+  private:
 
-  int8_t pinA = ENCODER_DT_PIN;       // DT from encoder
-  int8_t pinB = ENCODER_CLK_PIN;      // CLK from encoder
-  int8_t pinC = ENCODER_SW_PIN;       // SW from encoder
+    const int8_t fadeAmount;    // Amount to change every step (brightness)
+    unsigned long loopTime;
 
-  unsigned char select_state = 0;     // 0: brightness, 1: effect, 2: effect speed, ...
+    unsigned long buttonPressedTime;
+    unsigned long buttonWaitTime;
+    bool buttonPressedBefore;
+    bool buttonLongPressed;
 
-  uint16_t currentHue1 = 16; // default boot color
-  byte currentSat1 = 255;
-  
-#ifdef USERMOD_FOUR_LINE_DISPLAY
-  FourLineDisplayUsermod *display;
-#else
-  void* display = nullptr;
-#endif
+    int8_t pinA;                // DT from encoder
+    int8_t pinB;                // CLK from encoder
+    int8_t pinC;                // SW from encoder
 
-  // Pointers the start of the mode names within JSON_mode_names
-  const char **modes_qstrings = nullptr;
+    unsigned char select_state; // 0: brightness, 1: effect, 2: effect speed, ...
 
-  // Array of mode indexes in alphabetical order.
-  byte *modes_alpha_indexes = nullptr;
+    uint16_t currentHue1;       // default boot color
+    byte currentSat1;
+    uint8_t currentCCT;
+    
+  #ifdef USERMOD_FOUR_LINE_DISPLAY
+    FourLineDisplayUsermod *display;
+  #else
+    void* display;
+  #endif
 
-  // Pointers the start of the palette names within JSON_palette_names
-  const char **palettes_qstrings = nullptr;
+    // Pointers the start of the mode names within JSON_mode_names
+    const char **modes_qstrings;
 
-  // Array of palette indexes in alphabetical order.
-  byte *palettes_alpha_indexes = nullptr;
+    // Array of mode indexes in alphabetical order.
+    byte *modes_alpha_indexes;
 
-  unsigned char Enc_A;
-  unsigned char Enc_B;
-  unsigned char Enc_A_prev = 0;
+    // Pointers the start of the palette names within JSON_palette_names
+    const char **palettes_qstrings;
 
-  bool currentEffectAndPaletteInitialized = false;
-  uint8_t effectCurrentIndex = 0;
-  uint8_t effectPaletteIndex = 0;
-  uint8_t knownMode = 0;
-  uint8_t knownPalette = 0;
+    // Array of palette indexes in alphabetical order.
+    byte *palettes_alpha_indexes;
 
-  uint8_t currentCCT = 128;
+    struct { // reduce memory footprint
+      bool Enc_A      : 1;
+      bool Enc_B      : 1;
+      bool Enc_A_prev : 1;
+    };
 
-  byte presetHigh = 0;
-  byte presetLow = 0;
+    bool currentEffectAndPaletteInitialized;
+    uint8_t effectCurrentIndex;
+    uint8_t effectPaletteIndex;
+    uint8_t knownMode;
+    uint8_t knownPalette;
 
-  bool applyToAll = true;
+    byte presetHigh;
+    byte presetLow;
 
-  bool initDone = false;
-  bool enabled = true;
+    bool applyToAll;
 
-  // strings to reduce flash memory usage (used more than twice)
-  static const char _name[];
-  static const char _enabled[];
-  static const char _DT_pin[];
-  static const char _CLK_pin[];
-  static const char _SW_pin[];
-  static const char _presetHigh[];
-  static const char _presetLow[];
-  static const char _applyToAll[];
+    bool initDone;
+    bool enabled;
 
-  /**
-   * Sort the modes and palettes to the index arrays
-   * modes_alpha_indexes and palettes_alpha_indexes.
-   */
-  void sortModesAndPalettes();
+    bool usePcf8574;
+    int8_t pinIRQ;
 
-  byte *re_initIndexArray(int numModes);
+    // strings to reduce flash memory usage (used more than twice)
+    static const char _name[];
+    static const char _enabled[];
+    static const char _DT_pin[];
+    static const char _CLK_pin[];
+    static const char _SW_pin[];
+    static const char _presetHigh[];
+    static const char _presetLow[];
+    static const char _applyToAll[];
+    static const char _pcf8574[];
+    static const char _pcfAddress[];
+    static const char _pcfINTpin[];
 
-  /**
-   * Return an array of mode or palette names from the JSON string.
-   * They don't end in '\0', they end in '"'. 
-   */
-  const char **re_findModeStrings(const char json[], int numModes);
+    /**
+     * readPin() - read rotary encoder pin value
+     */
+    byte readPin(uint8_t pin);
 
-  /**
-   * Sort either the modes or the palettes using quicksort.
-   */
-  void re_sortModes(const char **modeNames, byte *indexes, int count, int numSkip);
+    /**
+     * Sort the modes and palettes to the index arrays
+     * modes_alpha_indexes and palettes_alpha_indexes.
+     */
+    void sortModesAndPalettes();
+    byte *re_initIndexArray(int numModes);
 
+    /**
+     * Return an array of mode or palette names from the JSON string.
+     * They don't end in '\0', they end in '"'. 
+     */
+    const char **re_findModeStrings(const char json[], int numModes);
 
-public:
-  /*
-   * setup() is called once at boot. WiFi is not yet connected at this point.
-   * You can use it to initialize variables, sensors or similar.
-   */
-  void setup();
+    /**
+     * Sort either the modes or the palettes using quicksort.
+     */
+    void re_sortModes(const char **modeNames, byte *indexes, int count, int numSkip);
 
-  /*
-   * connected() is called every time the WiFi is (re)connected
-   * Use it to initialize network interfaces
-   */
-  void connected();
+  public:
 
-  /*
-   * loop() is called continuously. Here you can check for events, read sensors, etc.
-   * 
-   * Tips:
-   * 1. You can use "if (WLED_CONNECTED)" to check for a successful network connection.
-   *    Additionally, "if (WLED_MQTT_CONNECTED)" is available to check for a connection to an MQTT broker.
-   * 
-   * 2. Try to avoid using the delay() function. NEVER use delays longer than 10 milliseconds.
-   *    Instead, use a timer check as shown here.
-   */
-  void loop();
+    RotaryEncoderUIUsermod()
+      : fadeAmount(5)
+      , buttonPressedTime(0)
+      , buttonWaitTime(0)
+      , buttonPressedBefore(false)
+      , buttonLongPressed(false)
+      , pinA(ENCODER_DT_PIN)
+      , pinB(ENCODER_CLK_PIN)
+      , pinC(ENCODER_SW_PIN)
+      , select_state(0)
+      , currentHue1(16)
+      , currentSat1(255)
+      , currentCCT(128)
+      , display(nullptr)
+      , modes_qstrings(nullptr)
+      , modes_alpha_indexes(nullptr)
+      , palettes_qstrings(nullptr)
+      , palettes_alpha_indexes(nullptr)
+      , currentEffectAndPaletteInitialized(false)
+      , effectCurrentIndex(0)
+      , effectPaletteIndex(0)
+      , knownMode(0)
+      , knownPalette(0)
+      , presetHigh(0)
+      , presetLow(0)
+      , applyToAll(true)
+      , initDone(false)
+      , enabled(true)
+      , usePcf8574(USE_PCF8574)
+      , pinIRQ(PCF8574_INT_PIN)
+    {}
 
-  void displayNetworkInfo();
-
-  void findCurrentEffectAndPalette();
-
-  boolean changeState(const char *stateName, byte markedLine, byte markedCol, byte glyph);
-
-  void lampUdated();
-
-  void changeBrightness(bool increase);
-
-
-  void changeEffect(bool increase);
-
-
-  void changeEffectSpeed(bool increase);
-
-
-  void changeEffectIntensity(bool increase);
-
-
-  void changeCustom(uint8_t par, bool increase);
-
-
-  void changePalette(bool increase);
-
-
-  void changeHue(bool increase);
-
-  void changeSat(bool increase);
-
-  void changePreset(bool increase) ;
-
-  void changeCCT(bool increase);
-
-  /*
-   * addToJsonInfo() can be used to add custom entries to the /json/info part of the JSON API.
-   * Creating an "u" object allows you to add custom key/value pairs to the Info section of the WLED web UI.
-   * Below it is shown how this could be used for e.g. a light sensor
-   */
-  /*
-  void addToJsonInfo(JsonObject& root)
-  {
-    int reading = 20;
-    //this code adds "u":{"Light":[20," lux"]} to the info object
-    JsonObject user = root["u"];
-    if (user.isNull()) user = root.createNestedObject("u");
-    JsonArray lightArr = user.createNestedArray("Light"); //name
-    lightArr.add(reading); //value
-    lightArr.add(" lux"); //unit
-  }
-  */
-
-  /*
-   * addToJsonState() can be used to add custom entries to the /json/state part of the JSON API (state object).
-   * Values in the state object may be modified by connected clients
-   */
-  /*
-  void addToJsonState(JsonObject &root)
-  {
-    //root["user0"] = userVar0;
-  }
-  */
-
-  /*
-   * readFromJsonState() can be used to receive data clients send to the /json/state part of the JSON API (state object).
-   * Values in the state object may be modified by connected clients
-   */
-  /*
-  void readFromJsonState(JsonObject &root)
-  {
-    //userVar0 = root["user0"] | userVar0; //if "user0" key exists in JSON, update, else keep old value
-    //if (root["bri"] == 255) Serial.println(F("Don't burn down your garage!"));
-  }
-  */
-
-  /**
-   * addToConfig() (called from set.cpp) stores persistent properties to cfg.json
-   */
-  void addToConfig(JsonObject &root);
-
-  //WLEDMM: add appendConfigData
-  void appendConfigData();
-
-  /**
-   * readFromConfig() is called before setup() to populate properties from values stored in cfg.json
-   *
-   * The function should return true if configuration was successfully loaded or false if there was no configuration.
-   */
-  bool readFromConfig(JsonObject &root);
-
-  /*
+    /*
      * getId() allows you to optionally give your V2 usermod an unique ID (please define it in const.h!).
      * This could be used in the future for the system to determine whether your usermod is installed.
      */
-  uint16_t getId()
-  {
-    return USERMOD_ID_ROTARY_ENC_UI;
-  }
+    uint16_t getId() { return USERMOD_ID_ROTARY_ENC_UI; }
+    /**
+     * Enable/Disable the usermod
+     */
+    inline void enable(bool enable) { if (!(pinA<0 || pinB<0 || pinC<0)) enabled = enable; }
+
+    /**
+     * Get usermod enabled/disabled state
+     */
+    inline bool isEnabled() { return enabled; }
+
+    /**
+     * setup() is called once at boot. WiFi is not yet connected at this point.
+     * You can use it to initialize variables, sensors or similar.
+     */
+    void setup();
+
+    /**
+     * connected() is called every time the WiFi is (re)connected
+     * Use it to initialize network interfaces
+     */
+    //void connected();
+
+    /**
+     * loop() is called continuously. Here you can check for events, read sensors, etc.
+     */
+    void loop();
+
+#ifndef WLED_DISABLE_MQTT
+    //bool onMqttMessage(char* topic, char* payload);
+    //void onMqttConnect(bool sessionPresent);
+#endif
+
+    /**
+     * handleButton() can be used to override default button behaviour. Returning true
+     * will prevent button working in a default way.
+     * Replicating button.cpp
+     */
+    //bool handleButton(uint8_t b);
+
+    /**
+     * addToJsonInfo() can be used to add custom entries to the /json/info part of the JSON API.
+     */
+    //void addToJsonInfo(JsonObject &root);
+
+    /**
+     * addToJsonState() can be used to add custom entries to the /json/state part of the JSON API (state object).
+     * Values in the state object may be modified by connected clients
+     */
+    //void addToJsonState(JsonObject &root);
+
+    /**
+     * readFromJsonState() can be used to receive data clients send to the /json/state part of the JSON API (state object).
+     * Values in the state object may be modified by connected clients
+     */
+    //void readFromJsonState(JsonObject &root);
+
+    /**
+     * provide the changeable values
+     */
+    void addToConfig(JsonObject &root);
+
+    void appendConfigData();
+
+    /**
+     * restore the changeable values
+     * readFromConfig() is called before setup() to populate properties from values stored in cfg.json
+     * 
+     * The function should return true if configuration was successfully loaded or false if there was no configuration.
+     */
+    bool readFromConfig(JsonObject &root);
+
+    // custom methods
+    void displayNetworkInfo();
+    void findCurrentEffectAndPalette();
+    bool changeState(const char *stateName, byte markedLine, byte markedCol, byte glyph);
+    void lampUdated();
+    void changeBrightness(bool increase);
+    void changeEffect(bool increase);
+    void changeEffectSpeed(bool increase);
+    void changeEffectIntensity(bool increase);
+    void changeCustom(uint8_t par, bool increase);
+    void changePalette(bool increase);
+    void changeHue(bool increase);
+    void changeSat(bool increase);
+    void changePreset(bool increase);
+    void changeCCT(bool increase);
 };
 
-// strings to reduce flash memory usage (used more than twice)
-const char RotaryEncoderUIUsermod::_name[]       PROGMEM = "Rotary-Encoder";
-const char RotaryEncoderUIUsermod::_enabled[]    PROGMEM = "enabled";
-const char RotaryEncoderUIUsermod::_DT_pin[]     PROGMEM = "DT-pin";
-const char RotaryEncoderUIUsermod::_CLK_pin[]    PROGMEM = "CLK-pin";
-const char RotaryEncoderUIUsermod::_SW_pin[]     PROGMEM = "SW-pin";
-const char RotaryEncoderUIUsermod::_presetHigh[] PROGMEM = "preset-high";
-const char RotaryEncoderUIUsermod::_presetLow[]  PROGMEM = "preset-low";
-const char RotaryEncoderUIUsermod::_applyToAll[] PROGMEM = "apply-2-all-seg";
+
+/**
+ * readPin() - read rotary encoder pin value
+ */
+byte RotaryEncoderUIUsermod::readPin(uint8_t pin) {
+  if (usePcf8574) {
+    if (pin >= 100) pin -= 100; // PCF I/O ports
+    return (pcfPortData>>pin) & 1;
+  } else {
+    return digitalRead(pin);
+  }
+}
 
 /**
  * Sort the modes and palettes to the index arrays
  * modes_alpha_indexes and palettes_alpha_indexes.
  */
 void RotaryEncoderUIUsermod::sortModesAndPalettes() {
+  DEBUG_PRINTLN(F("Sorting modes and palettes."));
   //modes_qstrings = re_findModeStrings(JSON_mode_names, strip.getModeCount());
   modes_qstrings = strip.getModeDataSrc();
   modes_alpha_indexes = re_initIndexArray(strip.getModeCount());
@@ -413,7 +466,9 @@ void RotaryEncoderUIUsermod::re_sortModes(const char **modeNames, byte *indexes,
 }
 
 
-// public:
+// public methods
+
+
 /*
   * setup() is called once at boot. WiFi is not yet connected at this point.
   * You can use it to initialize variables, sensors or similar.
@@ -421,31 +476,39 @@ void RotaryEncoderUIUsermod::re_sortModes(const char **modeNames, byte *indexes,
 void RotaryEncoderUIUsermod::setup()
 {
   DEBUG_PRINTLN(F("Usermod Rotary Encoder init."));
-  PinManagerPinType pins[3] = { { pinA, false }, { pinB, false }, { pinC, false } };
-  if ((pinA < 0) || (pinB < 0)) {                                               //WLEDMM catch error: [  1839][E][esp32-hal-gpio.c:102] __pinMode(): Invalid pin selected
-    enabled = false;
-    DEBUG_PRINTLN(F("Invalid GPIO pins for Usermod Rotary Encoder (ALT)."));   //WLEDMM add debug info
-    return;      
-  }
-  if (!enabled) return;     // WLEDMM don't allocated PINS if disabled
-  if (!pinManager.allocateMultiplePins(pins, 3, PinOwner::UM_RotaryEncoderUI)) {
-    // BUG: configuring this usermod with conflicting pins
-    //      will cause it to de-allocate pins it does not own
-    //      (at second config)
-    //      This is the exact type of bug solved by pinManager
-    //      tracking the owner tags....
-    pinA = pinB = pinC = -1;
-    enabled = false;
-    DEBUG_PRINTLN(F("Failed to alocate GPIO pins for Usermod Rotary Encoder (ALT)."));   //WLEDMM add debug info
-    return;
-  }
 
-  #ifndef USERMOD_ROTARY_ENCODER_GPIO
-    #define USERMOD_ROTARY_ENCODER_GPIO INPUT_PULLUP
-  #endif
-  pinMode(pinA, USERMOD_ROTARY_ENCODER_GPIO);
-  pinMode(pinB, USERMOD_ROTARY_ENCODER_GPIO);
-  if (pinC >= 0) pinMode(pinC, USERMOD_ROTARY_ENCODER_GPIO);   // WLEDMM catch error
+  if (usePcf8574) {
+    if (i2c_sda < 0 || i2c_scl < 0 || pinA < 0 || pinB < 0 || pinC < 0) {
+      DEBUG_PRINTLN(F("I2C and/or PCF8574 pins unused, disabling."));
+      enabled = false;
+      return;
+    } else {
+      if (pinIRQ >= 0 && pinManager.allocatePin(pinIRQ, false, PinOwner::UM_RotaryEncoderUI)) {
+        pinMode(pinIRQ, INPUT_PULLUP);
+        attachInterrupt(pinIRQ, i2cReadingISR, FALLING); // RISING, FALLING, CHANGE, ONLOW, ONHIGH
+        DEBUG_PRINTLN(F("Interrupt attached."));
+      } else {
+        DEBUG_PRINTLN(F("Unable to allocate interrupt pin, disabling."));
+        pinIRQ = -1;
+        enabled = false;
+        return;
+      }
+    }
+  } else {
+    PinManagerPinType pins[3] = { { pinA, false }, { pinB, false }, { pinC, false } };
+    if (!pinManager.allocateMultiplePins(pins, 3, PinOwner::UM_RotaryEncoderUI)) {
+      pinA = pinB = pinC = -1;
+      enabled = false;
+      return;
+    }
+
+    #ifndef USERMOD_ROTARY_ENCODER_GPIO
+      #define USERMOD_ROTARY_ENCODER_GPIO INPUT_PULLUP
+    #endif
+    pinMode(pinA, USERMOD_ROTARY_ENCODER_GPIO);
+    pinMode(pinB, USERMOD_ROTARY_ENCODER_GPIO);
+    pinMode(pinC, USERMOD_ROTARY_ENCODER_GPIO);
+  }
 
   loopTime = millis();
 
@@ -463,19 +526,9 @@ void RotaryEncoderUIUsermod::setup()
 #endif
 
   initDone = true;
-  Enc_A = digitalRead(pinA); // Read encoder pins
-  Enc_B = digitalRead(pinB);
+  Enc_A = readPin(pinA); // Read encoder pins
+  Enc_B = readPin(pinB);
   Enc_A_prev = Enc_A;
-  USER_PRINTLN(F("Rotary encoder (ALT) setup completed."));   // WLEDMM inform user
-}
-
-/*
-  * connected() is called every time the WiFi is (re)connected
-  * Use it to initialize network interfaces
-  */
-void RotaryEncoderUIUsermod::connected()
-{
-  //Serial.println("Connected to WiFi!");
 }
 
 /*
@@ -492,8 +545,7 @@ void RotaryEncoderUIUsermod::loop()
 {
   if (!enabled) return;
   unsigned long currentTime = millis(); // get the current elapsed time
-
-  if (strip.isUpdating() && (currentTime - loopTime < 4)) return;  // WLEDMM: be nice, but not too nice
+  if (strip.isUpdating() && ((currentTime - loopTime) < ENCODER_MAX_DELAY_MS)) return;  // be nice, but not too nice
 
   // Initialize effectCurrentIndex and effectPaletteIndex to
   // current state. We do it here as (at least) effectCurrent
@@ -503,18 +555,14 @@ void RotaryEncoderUIUsermod::loop()
     findCurrentEffectAndPalette();
   }
 
-  if (modes_alpha_indexes != nullptr) {  // WLEDMM bugfix
-    if (modes_alpha_indexes[effectCurrentIndex] != effectCurrent || palettes_alpha_indexes[effectPaletteIndex] != effectPalette) {
-      currentEffectAndPaletteInitialized = false;
-    }
+  if (modes_alpha_indexes[effectCurrentIndex] != effectCurrent || palettes_alpha_indexes[effectPaletteIndex] != effectPalette) {
+    DEBUG_PRINTLN(F("Current mode or palette changed."));
+    currentEffectAndPaletteInitialized = false;
   }
 
-  if (currentTime - loopTime >= 2) // 2ms since last check of encoder = 500Hz
+  if (currentTime >= (loopTime + 2)) // 2ms since last check of encoder = 500Hz
   {
-    loopTime = currentTime; // Updates loopTime
-
-    bool buttonPressed = false;
-    if (pinC >= 0) buttonPressed = !digitalRead(pinC); //0=pressed, 1=released
+    bool buttonPressed = !readPin(pinC); //0=pressed, 1=released
     if (buttonPressed) {
       if (!buttonPressedBefore) buttonPressedTime = currentTime;
       buttonPressedBefore = true;
@@ -540,7 +588,7 @@ void RotaryEncoderUIUsermod::loop()
       buttonWaitTime = 0;
       char newState = select_state + 1;
       bool changedState = false;
-      char lineBuffer[64] = { '\0' };
+      char lineBuffer[64];
       do {
         // finde new state
         switch (newState) {
@@ -581,8 +629,8 @@ void RotaryEncoderUIUsermod::loop()
       if (changedState) select_state = newState;
     }
 
-    Enc_A = digitalRead(pinA); // Read encoder pins
-    Enc_B = digitalRead(pinB);
+    Enc_A = readPin(pinA); // Read encoder pins
+    Enc_B = readPin(pinB);
     if ((Enc_A) && (!Enc_A_prev))
     { // A has gone from high to low
       if (Enc_B == LOW)    //changes to LOW so that then encoder registers a change at the very end of a pulse
@@ -621,18 +669,18 @@ void RotaryEncoderUIUsermod::loop()
       }
     }
     Enc_A_prev = Enc_A;     // Store value of A for next time
+    loopTime = currentTime; // Updates loopTime
   }
 }
 
 void RotaryEncoderUIUsermod::displayNetworkInfo() {
   #ifdef USERMOD_FOUR_LINE_DISPLAY
-  if (display != nullptr)
   display->networkOverlay(PSTR("NETWORK INFO"), 10000);
   #endif
 }
 
 void RotaryEncoderUIUsermod::findCurrentEffectAndPalette() {
-  if (modes_alpha_indexes == nullptr) return; // WLEDMM bugfix
+  DEBUG_PRINTLN(F("Finding current mode and palette."));
   currentEffectAndPaletteInitialized = true;
   for (uint8_t i = 0; i < strip.getModeCount(); i++) {
     if (modes_alpha_indexes[i] == effectCurrent) {
@@ -640,6 +688,7 @@ void RotaryEncoderUIUsermod::findCurrentEffectAndPalette() {
       break;
     }
   }
+  DEBUG_PRINTLN(F("Found current mode."));
 
   for (uint8_t i = 0; i < strip.getPaletteCount(); i++) {
     if (palettes_alpha_indexes[i] == effectPalette) {
@@ -647,9 +696,10 @@ void RotaryEncoderUIUsermod::findCurrentEffectAndPalette() {
       break;
     }
   }
+  DEBUG_PRINTLN(F("Found palette."));
 }
 
-boolean RotaryEncoderUIUsermod::changeState(const char *stateName, byte markedLine, byte markedCol, byte glyph) {
+bool RotaryEncoderUIUsermod::changeState(const char *stateName, byte markedLine, byte markedCol, byte glyph) {
 #ifdef USERMOD_FOUR_LINE_DISPLAY
   if (display != nullptr) {
     if (display->wakeDisplay()) {
@@ -669,8 +719,7 @@ void RotaryEncoderUIUsermod::lampUdated() {
   // 6: fx changed 7: hue 8: preset cycle 9: blynk 10: alexa
   //setValuesFromFirstSelectedSeg(); //to make transition work on main segment (should no longer be required)
   stateUpdated(CALL_MODE_BUTTON);
-  if ((millis() - lastInterfaceUpdate) > INTERFACE_UPDATE_COOLDOWN)   // WLEDMM respect cooldown times, to avoid crash in AsyncWebSocketMessageBuffer
-    updateInterfaces(CALL_MODE_BUTTON);
+  updateInterfaces(CALL_MODE_BUTTON);
 }
 
 void RotaryEncoderUIUsermod::changeBrightness(bool increase) {
@@ -682,14 +731,10 @@ void RotaryEncoderUIUsermod::changeBrightness(bool increase) {
   }
   display->updateRedrawTime();
 #endif
-  byte lastBri = bri;
-  if (bri < 40) bri = max(min((increase ? bri+fadeAmount/2 : bri-fadeAmount/2), 255), 0);    // WLEDMM slower steps when brightness < 16%
-  else bri = max(min((increase ? bri+fadeAmount : bri-fadeAmount), 255), 0);
-  if (lastBri != bri) stateChanged = true;                                                   // WLEDMM bugfix
+  bri = max(min((increase ? bri+fadeAmount : bri-fadeAmount), 255), 0);
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  if (display->canDraw())   // only draw if nothing else is drawing
-    display->updateBrightness();
+  display->updateBrightness();
 #endif
 }
 
@@ -704,7 +749,7 @@ void RotaryEncoderUIUsermod::changeEffect(bool increase) {
   display->updateRedrawTime();
 #endif
   effectCurrentIndex = max(min((increase ? effectCurrentIndex+1 : effectCurrentIndex-1), strip.getModeCount()-1), 0);
-  if (modes_alpha_indexes != nullptr) effectCurrent = modes_alpha_indexes[effectCurrentIndex];
+  effectCurrent = modes_alpha_indexes[effectCurrentIndex];
   stateChanged = true;
   if (applyToAll) {
     for (byte i=0; i<strip.getSegmentsNum(); i++) {
@@ -718,8 +763,7 @@ void RotaryEncoderUIUsermod::changeEffect(bool increase) {
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  if (display->canDraw())   // only draw if nothing else is drawing
-    display->showCurrentEffectOrPalette(effectCurrent, JSON_mode_names, 3);
+  display->showCurrentEffectOrPalette(effectCurrent, JSON_mode_names, 3);
 #endif
 }
 
@@ -747,8 +791,7 @@ void RotaryEncoderUIUsermod::changeEffectSpeed(bool increase) {
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  if (display->canDraw())   // only draw if nothing else is drawing
-    display->updateSpeed();
+  display->updateSpeed();
 #endif
 }
 
@@ -776,15 +819,14 @@ void RotaryEncoderUIUsermod::changeEffectIntensity(bool increase) {
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  if (display->canDraw())   // only draw if nothing else is drawing
-    display->updateIntensity();
+  display->updateIntensity();
 #endif
 }
 
 
 void RotaryEncoderUIUsermod::changeCustom(uint8_t par, bool increase) {
-#ifdef USERMOD_FOUR_LINE_DISPLAY
   uint8_t val = 0;
+#ifdef USERMOD_FOUR_LINE_DISPLAY
   if (display && display->wakeDisplay()) {
     display->redraw(true);
     // Throw away wake up input
@@ -796,13 +838,11 @@ void RotaryEncoderUIUsermod::changeCustom(uint8_t par, bool increase) {
   if (applyToAll) {
     uint8_t id = strip.getFirstSelectedSegId();
     Segment& sid = strip.getSegment(id);
-#ifdef USERMOD_FOUR_LINE_DISPLAY
     switch (par) {
       case 3:  val = sid.custom3 = max(min((increase ? sid.custom3+fadeAmount : sid.custom3-fadeAmount), 255), 0); break;
       case 2:  val = sid.custom2 = max(min((increase ? sid.custom2+fadeAmount : sid.custom2-fadeAmount), 255), 0); break;
       default: val = sid.custom1 = max(min((increase ? sid.custom1+fadeAmount : sid.custom1-fadeAmount), 255), 0); break;
     }
-#endif
     for (byte i=0; i<strip.getSegmentsNum(); i++) {
       Segment& seg = strip.getSegment(i);
       if (!seg.isActive() || i == id) continue;
@@ -813,19 +853,17 @@ void RotaryEncoderUIUsermod::changeCustom(uint8_t par, bool increase) {
       }
     }
   } else {
-#ifdef USERMOD_FOUR_LINE_DISPLAY
     Segment& seg = strip.getMainSegment();
     switch (par) {
       case 3:  val = seg.custom3 = max(min((increase ? seg.custom3+fadeAmount : seg.custom3-fadeAmount), 255), 0); break;
       case 2:  val = seg.custom2 = max(min((increase ? seg.custom2+fadeAmount : seg.custom2-fadeAmount), 255), 0); break;
       default: val = seg.custom1 = max(min((increase ? seg.custom1+fadeAmount : seg.custom1-fadeAmount), 255), 0); break;
     }
-#endif
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  char lineBuffer[64] = { '\0' };
-  snprintf(lineBuffer, 63, "%d", val); // WLEDMM: avoid string buffer overflow
+  char lineBuffer[64];
+  sprintf(lineBuffer, "%d", val);
   display->overlay(lineBuffer, 500, 10); // use star
 #endif
 }
@@ -855,8 +893,7 @@ void RotaryEncoderUIUsermod::changePalette(bool increase) {
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-if (display->canDraw())   // only draw if nothing else is drawing
-    display->showCurrentEffectOrPalette(effectPalette, JSON_palette_names, 2);
+  display->showCurrentEffectOrPalette(effectPalette, JSON_palette_names, 2);
 #endif
 }
 
@@ -885,8 +922,8 @@ void RotaryEncoderUIUsermod::changeHue(bool increase){
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  char lineBuffer[64] = { '\0' };
-  snprintf(lineBuffer, 63, "%d", currentHue1);  // WLEDMM: avoid string buffer overflow
+  char lineBuffer[64];
+  sprintf(lineBuffer, "%d", currentHue1);
   display->overlay(lineBuffer, 500, 7); // use brush
 #endif
 }
@@ -914,8 +951,8 @@ void RotaryEncoderUIUsermod::changeSat(bool increase){
   }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  char lineBuffer[64] = { '\0' };
-  snprintf(lineBuffer, 63, "%d", currentSat1);  // WLEDMM: avoid string buffer overflow
+  char lineBuffer[64];
+  sprintf(lineBuffer, "%d", currentSat1);
   display->overlay(lineBuffer, 500, 8); // use contrast
 #endif
 }
@@ -931,8 +968,8 @@ void RotaryEncoderUIUsermod::changePreset(bool increase) {
 #endif
   if (presetHigh && presetLow && presetHigh > presetLow) {
     StaticJsonDocument<64> root;
-    char str[64] = { '\0' };
-    snprintf_P(str, 64, PSTR("%d~%d~%s"), presetLow, presetHigh, increase?"":"-");
+    char str[64];
+    sprintf_P(str, PSTR("%d~%d~%s"), presetLow, presetHigh, increase?"":"-");
     root["ps"] = str;
     deserializeState(root.as<JsonObject>(), CALL_MODE_BUTTON_PRESET);
 /*
@@ -946,7 +983,7 @@ void RotaryEncoderUIUsermod::changePreset(bool increase) {
 */
     lampUdated();
   #ifdef USERMOD_FOUR_LINE_DISPLAY
-    snprintf(str, 63, "%d", currentPreset);    // WLEDMM: avoid string buffer overflow
+    sprintf(str, "%d", currentPreset);
     display->overlay(str, 500, 11); // use heart
   #endif
   }
@@ -974,8 +1011,8 @@ void RotaryEncoderUIUsermod::changeCCT(bool increase){
 //    }
   lampUdated();
 #ifdef USERMOD_FOUR_LINE_DISPLAY
-  char lineBuffer[64] = { '\0' };
-  snprintf(lineBuffer, 63, "%d", currentCCT); // WLEDMM: avoid string buffer overflow
+  char lineBuffer[64];
+  sprintf(lineBuffer, "%d", currentCCT);
   display->overlay(lineBuffer, 500, 10); // use star
 #endif
 }
@@ -986,7 +1023,7 @@ void RotaryEncoderUIUsermod::changeCCT(bool increase){
   * Below it is shown how this could be used for e.g. a light sensor
   */
 /*
-void addToJsonInfo(JsonObject& root)
+void RotaryEncoderUIUsermod::addToJsonInfo(JsonObject& root)
 {
   int reading = 20;
   //this code adds "u":{"Light":[20," lux"]} to the info object
@@ -1003,7 +1040,7 @@ void addToJsonInfo(JsonObject& root)
   * Values in the state object may be modified by connected clients
   */
 /*
-void addToJsonState(JsonObject &root)
+void RotaryEncoderUIUsermod::addToJsonState(JsonObject &root)
 {
   //root["user0"] = userVar0;
 }
@@ -1014,7 +1051,7 @@ void addToJsonState(JsonObject &root)
   * Values in the state object may be modified by connected clients
   */
 /*
-void readFromJsonState(JsonObject &root)
+void RotaryEncoderUIUsermod::readFromJsonState(JsonObject &root)
 {
   //userVar0 = root["user0"] | userVar0; //if "user0" key exists in JSON, update, else keep old value
   //if (root["bri"] == 255) Serial.println(F("Don't burn down your garage!"));
@@ -1034,23 +1071,15 @@ void RotaryEncoderUIUsermod::addToConfig(JsonObject &root) {
   top[FPSTR(_presetLow)]  = presetLow;
   top[FPSTR(_presetHigh)] = presetHigh;
   top[FPSTR(_applyToAll)] = applyToAll;
+  top[FPSTR(_pcf8574)]    = usePcf8574;
+  top[FPSTR(_pcfAddress)] = addrPcf8574;
+  top[FPSTR(_pcfINTpin)]  = pinIRQ;
   DEBUG_PRINTLN(F("Rotary Encoder config saved."));
 }
 
-//WLEDMM: add appendConfigData
-void RotaryEncoderUIUsermod::appendConfigData()
-{
-  oappend(SET_F("addHB('Rotary-Encoder');"));
-
-  #ifdef ENCODER_DT_PIN
-    oappend(SET_F("xOpt('Rotary-Encoder:DT-pin',1,' ⎌',")); oappendi(ENCODER_DT_PIN); oappend(");"); 
-  #endif
-  #ifdef ENCODER_CLK_PIN
-    oappend(SET_F("xOpt('Rotary-Encoder:CLK-pin',1,' ⎌',")); oappendi(ENCODER_CLK_PIN); oappend(");"); 
-  #endif
-  #ifdef ENCODER_SW_PIN
-    oappend(SET_F("xOpt('Rotary-Encoder:SW-pin',1,' ⎌',")); oappendi(ENCODER_SW_PIN); oappend(");"); 
-  #endif
+void RotaryEncoderUIUsermod::appendConfigData() {
+  oappend(SET_F("addInfo('Rotary-Encoder:PCF8574-address',1,'<i>(not hex!)</i>');"));
+  oappend(SET_F("d.extra.push({'Rotary-Encoder':{pin:[['P0',100],['P1',101],['P2',102],['P3',103],['P4',104],['P5',105],['P6',106],['P7',107]]}});"));
 }
 
 /**
@@ -1069,6 +1098,8 @@ bool RotaryEncoderUIUsermod::readFromConfig(JsonObject &root) {
   int8_t newDTpin  = top[FPSTR(_DT_pin)]  | pinA;
   int8_t newCLKpin = top[FPSTR(_CLK_pin)] | pinB;
   int8_t newSWpin  = top[FPSTR(_SW_pin)]  | pinC;
+  int8_t newIRQpin = top[FPSTR(_pcfINTpin)] | pinIRQ;
+  bool   oldPcf8574 = usePcf8574;
 
   presetHigh = top[FPSTR(_presetHigh)] | presetHigh;
   presetLow  = top[FPSTR(_presetLow)]  | presetLow;
@@ -1077,6 +1108,9 @@ bool RotaryEncoderUIUsermod::readFromConfig(JsonObject &root) {
 
   enabled    = top[FPSTR(_enabled)] | enabled;
   applyToAll = top[FPSTR(_applyToAll)] | applyToAll;
+
+  usePcf8574 = top[FPSTR(_pcf8574)] | usePcf8574;
+  addrPcf8574 = top[FPSTR(_pcfAddress)] | addrPcf8574;
 
   DEBUG_PRINT(FPSTR(_name));
   if (!initDone) {
@@ -1088,20 +1122,44 @@ bool RotaryEncoderUIUsermod::readFromConfig(JsonObject &root) {
   } else {
     DEBUG_PRINTLN(F(" config (re)loaded."));
     // changing parameters from settings page
-    if (pinA!=newDTpin || pinB!=newCLKpin || pinC!=newSWpin) {
-      pinManager.deallocatePin(pinA, PinOwner::UM_RotaryEncoderUI);
-      pinManager.deallocatePin(pinB, PinOwner::UM_RotaryEncoderUI);
-      pinManager.deallocatePin(pinC, PinOwner::UM_RotaryEncoderUI);
+    if (pinA!=newDTpin || pinB!=newCLKpin || pinC!=newSWpin || pinIRQ!=newIRQpin) {
+      if (oldPcf8574) {
+        if (pinIRQ >= 0) {
+          detachInterrupt(pinIRQ);
+          pinManager.deallocatePin(pinIRQ, PinOwner::UM_RotaryEncoderUI);
+          DEBUG_PRINTLN(F("Deallocated old IRQ pin."));
+        }
+        pinIRQ = newIRQpin<100 ? newIRQpin : -1; // ignore PCF8574 pins
+      } else {
+        pinManager.deallocatePin(pinA, PinOwner::UM_RotaryEncoderUI);
+        pinManager.deallocatePin(pinB, PinOwner::UM_RotaryEncoderUI);
+        pinManager.deallocatePin(pinC, PinOwner::UM_RotaryEncoderUI);
+        DEBUG_PRINTLN(F("Deallocated old pins."));
+      }
       pinA = newDTpin;
       pinB = newCLKpin;
       pinC = newSWpin;
-      if (pinA<0 || pinB<0) { // WLEDMM support for rotary without pushbutton
+      if (pinA<0 || pinB<0 || pinC<0) {
         enabled = false;
         return true;
       }
-      if (enabled) setup();   // WLEDMM no pin stealing!
+      setup();
     }
   }
   // use "return !top["newestParameter"].isNull();" when updating Usermod with new features
-  return !top[FPSTR(_applyToAll)].isNull();
+  return !top[FPSTR(_pcfINTpin)].isNull();
 }
+
+
+// strings to reduce flash memory usage (used more than twice)
+const char RotaryEncoderUIUsermod::_name[]       PROGMEM = "Rotary-Encoder";
+const char RotaryEncoderUIUsermod::_enabled[]    PROGMEM = "enabled";
+const char RotaryEncoderUIUsermod::_DT_pin[]     PROGMEM = "DT-pin";
+const char RotaryEncoderUIUsermod::_CLK_pin[]    PROGMEM = "CLK-pin";
+const char RotaryEncoderUIUsermod::_SW_pin[]     PROGMEM = "SW-pin";
+const char RotaryEncoderUIUsermod::_presetHigh[] PROGMEM = "preset-high";
+const char RotaryEncoderUIUsermod::_presetLow[]  PROGMEM = "preset-low";
+const char RotaryEncoderUIUsermod::_applyToAll[] PROGMEM = "apply-2-all-seg";
+const char RotaryEncoderUIUsermod::_pcf8574[]    PROGMEM = "use-PCF8574";
+const char RotaryEncoderUIUsermod::_pcfAddress[] PROGMEM = "PCF8574-address";
+const char RotaryEncoderUIUsermod::_pcfINTpin[]  PROGMEM = "PCF8574-INT-pin";
