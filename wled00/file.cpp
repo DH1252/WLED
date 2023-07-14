@@ -10,11 +10,8 @@
 #endif
 #endif
 
-#if defined(WLEDMM_FASTPATH)  // WLEMM use bigger buffer when reading, to reduce number of file operations
-#define FS_BUFSIZE 512
-#else
+//WLEDMM seems that 256 is indeed the optimal buffer length
 #define FS_BUFSIZE 256
-#endif
 
 /*
  * Structural requirements for files managed by writeObjectToFile() and readObjectFromFile() utilities:

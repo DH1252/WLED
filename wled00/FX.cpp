@@ -37,12 +37,12 @@
 #define indexToVStrip(index, stripNr) ((index) | (int((stripNr)+1)<<16))
 
 // effect utility functions
-uint8_t sin_gap(uint16_t in) {
+static uint8_t sin_gap(uint16_t in) {
   if (in & 0x100) return 0;
   return sin8(in + 192); // correct phase shift of sine so that it starts and stops at 0
 }
 
-uint16_t triwave16(uint16_t in) {
+static uint16_t triwave16(uint16_t in) {
   if (in < 0x8000) return in *2;
   return 0xFFFF - (in - 0x8000)*2;
 }
@@ -54,7 +54,7 @@ uint16_t triwave16(uint16_t in) {
  * @param attdec attac & decay, max. pulsewidth / 2
  * @returns signed waveform value
  */
-int8_t tristate_square8(uint8_t x, uint8_t pulsewidth, uint8_t attdec) {
+static int8_t tristate_square8(uint8_t x, uint8_t pulsewidth, uint8_t attdec) {
   int8_t a = 127;
   if (x > 127) {
     a = -127;
@@ -2239,7 +2239,7 @@ uint16_t mode_colortwinkle() {
       }
     }
   }
-  return FRAMETIME_FIXED;
+  return FRAMETIME_FIXED_SLOW;
 }
 static const char _data_FX_MODE_COLORTWINKLE[] PROGMEM = "Colortwinkles@Fade speed,Spawn speed;;!;;m12=0"; //pixels
 
@@ -3092,7 +3092,7 @@ uint16_t candle(bool multi)
     }
   }
 
-  return FRAMETIME_FIXED;
+  return FRAMETIME_FIXED_SLOW;
 }
 
 
@@ -6052,18 +6052,21 @@ uint16_t mode_ripplepeak(void) {                // * Ripple peak. By Andrew Tuli
   // printUmData();
 
   if (SEGENV.call == 0) {
+    SEGMENT.setUpLeds();
     SEGENV.aux0 = 255;
     SEGMENT.custom1 = *binNum;
     SEGMENT.custom2 = *maxVol * 2;
   }
   if (SEGMENT.custom1 < 1) SEGMENT.custom1 = 1;   // WLEDMM prevent stupid settings for bin
+
   if (SEGMENT.custom2 < 24) SEGMENT.custom2 = 24; // WLEDMM prevent stupid settings for maxVol (below 24 = noise)
 
   *binNum = SEGMENT.custom1;                              // Select a bin.
   *maxVol = SEGMENT.custom2 / 2;                          // Our volume comparator.
 
-  SEGMENT.fade_out(240);                                  // Lower frame rate means less effective fading than FastLED
-  SEGMENT.fade_out(240);
+  //SEGMENT.fade_out(240);                                  // Lower frame rate means less effective fading than FastLED
+  //SEGMENT.fade_out(240);
+  SEGMENT.fade_out(224);  // should be the same as 240 applied twice
 
   for (int i = 0; i < SEGMENT.intensity/16; i++) {   // Limit the number of ripples.
     if (samplePeak) ripples[i].state = 255;
@@ -6076,7 +6079,8 @@ uint16_t mode_ripplepeak(void) {                // * Ripple peak. By Andrew Tuli
         ripples[i].pos = random16(SEGLEN);
         #ifdef ESP32
           if (FFT_MajorPeak > 1)                          // log10(0) is "forbidden" (throws exception)
-          ripples[i].color = (int)(log10f(FFT_MajorPeak)*128);
+          //ripples[i].color = (int)(log10f(FFT_MajorPeak)*128);  // not to self: buggy !!
+          ripples[i].color = (int)(logf(FFT_MajorPeak)*32.0f);  // works up to 10025 hz
           else ripples[i].color = 0;
         #else
           ripples[i].color = random8();
@@ -6486,8 +6490,12 @@ uint16_t mode_midnoise(void) {                  // Midnoise. By Andrew Tuline.
   }
   float   volumeSmth   = *(float*)  um_data->u_data[0];
 
-  SEGMENT.fade_out(SEGMENT.speed);
-  SEGMENT.fade_out(SEGMENT.speed);
+  if (SEGENV.call == 0) {
+    SEGMENT.setUpLeds();
+    SEGMENT.fill(BLACK);
+  }
+  SEGMENT.fadeToBlackBy(SEGMENT.speed/2);
+  //SEGMENT.fade_out(SEGMENT.speed);
 
   float tmpSound2 = volumeSmth * (float)SEGMENT.intensity / 256.0;  // Too sensitive.
   tmpSound2 *= (float)SEGMENT.intensity / 128.0;              // Reduce sensitity/length.
@@ -6632,8 +6640,13 @@ uint16_t mode_plasmoid(void) {                  // Plasmoid. By Andrew Tuline.
   }
   float   volumeSmth   = *(float*)  um_data->u_data[0];
 
-  SEGMENT.fadeToBlackBy(32);
-
+  if (SEGENV.call == 0) {
+    SEGMENT.setUpLeds();
+    SEGMENT.fill(BLACK);
+  }
+  //SEGMENT.fadeToBlackBy(32);
+  SEGMENT.fadeToBlackBy(48);
+  
   plasmoip->thisphase += beatsin8(6,-4,4);                          // You can change direction and speed individually.
   plasmoip->thatphase += beatsin8(7,-4,4);                          // Two phase values to make a complex pattern. By Andrew Tuline.
 
@@ -6842,7 +6855,7 @@ uint16_t mode_blurz(void) {                    // Blurz. By Andrew Tuline.
     SEGMENT.setPixelColor(segLoc, color_blend(SEGCOLOR(1), SEGMENT.color_from_palette((uint16_t)pixColor, false, PALETTE_SOLID_WRAP, 0),(uint8_t)pixIntensity)); // repaint center pixel after blur
   } else SEGMENT.blur(max(SEGMENT.intensity, (uint8_t)1));  // silence - just blur it again
 
-  return FRAMETIME;
+  return FRAMETIME_FIXED;
 } // mode_blurz()
 static const char _data_FX_MODE_BLURZ[] PROGMEM = "Blurz ☾@Fade rate,Blur;!,Color mix;!;1f;sx=48,ix=127,m12=0,si=0"; // Pixels, Beatsin
 #endif
@@ -6931,7 +6944,10 @@ uint16_t mode_freqmap(void) {                   // Map FFT_MajorPeak to SEGLEN. 
   float my_magnitude  = *(float*)um_data->u_data[5] / 4.0f;
   if (FFT_MajorPeak < 1) FFT_MajorPeak = 1;                                         // log10(0) is "forbidden" (throws exception)
 
-  if (SEGENV.call == 0) SEGMENT.fill(BLACK);
+  if (SEGENV.call == 0) {
+    SEGMENT.setUpLeds();
+    SEGMENT.fill(BLACK);
+  }
   int fadeoutDelay = (256 - SEGMENT.speed) / 32;
   if ((fadeoutDelay <= 1 ) || ((SEGENV.call % fadeoutDelay) == 0)) SEGMENT.fade_out(SEGMENT.speed);
 
@@ -6954,7 +6970,7 @@ uint16_t mode_freqmap(void) {                   // Map FFT_MajorPeak to SEGLEN. 
     SEGMENT.setPixelColor(locn, color_blend(SEGCOLOR(1), SEGMENT.color_from_palette(SEGMENT.intensity+pixCol, false, PALETTE_SOLID_WRAP, 0), bright));
   }
 
-  return FRAMETIME;
+  return FRAMETIME_FIXED;
 } // mode_freqmap()
 static const char _data_FX_MODE_FREQMAP[] PROGMEM = "Freqmap@Fade rate,Starting color;!,!;!;1f;m12=0,si=0"; // Pixels, Beatsin
 
@@ -7077,8 +7093,8 @@ uint16_t mode_freqwave(void) {                  // Freqwave. By Andreas Pleschun
     SEGMENT.fill(BLACK);
   }
 
-  uint8_t secondHand = micros()/(256-SEGMENT.speed)/500 % 16;
-  if((SEGMENT.speed > 254) || (SEGENV.aux0 != secondHand)) {   // WLEDMM allow run run at full speed
+  uint8_t secondHand = (SEGMENT.speed < 255) ? (micros()/(256-SEGMENT.speed)/500 % 16) : 0;
+  if((SEGMENT.speed > 254) || (SEGENV.aux0 != secondHand)) {   // WLEDMM allow to run at full speed
     SEGENV.aux0 = secondHand;
 
     float sensitivity = 0.5f * mapf(SEGMENT.custom3, 1, 31, 0.5, 10); // reduced resolution slider

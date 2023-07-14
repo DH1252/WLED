@@ -31,6 +31,7 @@
 
 #include "const.h"
 
+bool canUseSerial(void);                        // WLEDMM implemented in wled_serial.cpp
 void strip_wait_until_idle(String whoCalledMe); // WLEDMM implemented in FX_fcn.cpp
 
 #define FASTLED_INTERNAL //remove annoying pragma messages
@@ -59,10 +60,21 @@ void strip_wait_until_idle(String whoCalledMe); // WLEDMM implemented in FX_fcn.
 #endif
 
 /* Not used in all effects yet */
-#define WLED_FPS         42
-#define FRAMETIME_FIXED  (1000/WLED_FPS)
+#if defined(ARDUINO_ARCH_ESP32) && defined(WLEDMM_FASTPATH)   // WLEDMM go faster on ESP32
+#define WLED_FPS         120
+#define FRAMETIME_FIXED  (strip.getFrameTime() < 10 ? 12 : 24)
+#define WLED_FPS_SLOW         60
+#define FRAMETIME_FIXED_SLOW  (15)    // = 66 FPS => 1000/66
 //#define FRAMETIME        _frametime
 #define FRAMETIME        strip.getFrameTime()
+#else
+#define WLED_FPS         42
+#define FRAMETIME_FIXED  (1000/WLED_FPS)
+#define WLED_FPS_SLOW         42
+#define FRAMETIME_FIXED_SLOW  (1000/WLED_FPS_SLOW)
+//#define FRAMETIME        _frametime
+#define FRAMETIME        strip.getFrameTime()
+#endif
 
 /* each segment uses 52 bytes of SRAM memory, so if you're application fails because of
   insufficient memory, decreasing MAX_NUM_SEGMENTS may help */
@@ -85,7 +97,6 @@ void strip_wait_until_idle(String whoCalledMe); // WLEDMM implemented in FX_fcn.
   assuming each segment uses the same amount of data. 256 for ESP8266, 640 for ESP32. */
 #define FAIR_DATA_PER_SEG (MAX_SEGMENT_DATA / strip.getMaxSegments())
 
-//#define MIN_SHOW_DELAY   (_frametime < 16 ? 8 : 15)
 #define MIN_SHOW_DELAY   (_frametime < 16 ? (_frametime <8? (_frametime <7? (_frametime <6 ? 2 :3) :4) : 8) : 15)    // WLEDMM support higher framerates (up to 250fps)
 
 #define NUM_COLORS       3 /* number of colors per segment */
@@ -377,7 +388,7 @@ typedef struct Segment {
     };
     uint8_t startY;  // start Y coodrinate 2D (top); there should be no more than 255 rows
     uint8_t stopY;   // stop Y coordinate 2D (bottom); there should be no more than 255 rows
-    char *name;
+    char *name = nullptr; // WLEDMM initialize to nullptr
 
     // runtime data
     unsigned long next_time;  // millis() of next update
@@ -385,9 +396,9 @@ typedef struct Segment {
     uint32_t call;  // call counter
     uint16_t aux0;  // custom var
     uint16_t aux1;  // custom var
-    byte* data;     // effect data pointer
-    CRGB* ledsrgb;     // local leds[] array (may be a pointer to global) //WLEDMM rename to ledsrgb to search on them (temp?)
-    uint16_t ledsrgbSize; //WLEDMM
+    byte* data = nullptr;     // effect data pointer // WLEDMM initialize to nullptr
+    CRGB* ledsrgb = nullptr;     // local leds[] array (may be a pointer to global) //WLEDMM rename to ledsrgb to search on them (temp?), and initialilize to nullptr
+    size_t ledsrgbSize; //WLEDMM 
     static CRGB *_globalLeds;             // global leds[] array
     static uint16_t maxWidth, maxHeight;  // these define matrix width & height (max. segment dimensions)
     void *jMap = nullptr; //WLEDMM jMap
@@ -403,8 +414,8 @@ typedef struct Segment {
         uint8_t _reserved : 4;
       };
     };
-    uint16_t _dataLen;
-    static uint16_t _usedSegmentData;
+    size_t _dataLen;                   // WLEDMM uint16_t is too small
+    static size_t _usedSegmentData;    // WLEDMM uint16_t is too small
 
     // transition data, valid only if transitional==true, holds values during transition
     struct Transition {
@@ -417,7 +428,7 @@ typedef struct Segment {
       //uint16_t      _aux0, _aux1; // previous mode/effect runtime data
       //uint32_t      _step, _call; // previous mode/effect runtime data
       //byte         *_data;        // previous mode/effect runtime data
-      uint32_t      _start;
+      unsigned long _start;         // must accommodate millis()
       uint16_t      _dur;
       Transition(uint16_t dur=750)
         : _briT(255)
@@ -490,22 +501,24 @@ typedef struct Segment {
     Segment(Segment &&orig) noexcept; // move constructor
 
     ~Segment() {
-      //#ifdef WLED_DEBUG
-      Serial.print(F("Destroying segment:"));
-      if (name) Serial.printf(" %s (%p)", name, name);
-      if (data) Serial.printf(" %d (%p)", (int)_dataLen, data);
-      if (ledsrgb) Serial.printf(" [%u]", length()*sizeof(CRGB));
-      Serial.println();
-      //#endif
+      #ifdef WLED_DEBUG
+      if(canUseSerial()) {
+        Serial.print(F("Destroying segment:"));
+        if (name) Serial.printf(" name=%s (%p)", name, name);
+        if (data) Serial.printf(" dataLen=%d (%p)", (int)_dataLen, data);
+        if (ledsrgb) Serial.printf(" [%sledsrgb %u bytes]", Segment::_globalLeds ? "global ":"",length()*sizeof(CRGB));
+        Serial.println();
+      }
+      #endif
 
       // WLEDMM only delete segments when they are not in use
       #ifdef ARDUINO_ARCH_ESP32
       strip_wait_until_idle("~Segment()");
       #endif
 
-      if (!Segment::_globalLeds && ledsrgb) free(ledsrgb);
-      if (name) delete[] name;
-      if (_t) delete _t;
+      if (!Segment::_globalLeds && (ledsrgb != nullptr)) {free(ledsrgb); ledsrgb = nullptr;}
+      if (name) { delete[] name; name = nullptr; }
+      if (_t)   { transitional = false; delete _t; _t = nullptr; }
       deallocateData();
     }
 
@@ -523,13 +536,13 @@ typedef struct Segment {
     inline bool     hasRGB(void)         const { return _isRGB; }
     inline bool     hasWhite(void)       const { return _hasW; }
     inline bool     isCCT(void)          const { return _isCCT; }
-    inline uint16_t width(void)          const { return stop - start; }       // segment width in physical pixels (length if 1D)
-    inline uint16_t height(void)         const { return stopY - startY; }     // segment height (if 2D) in physical pixels
-    inline uint16_t length(void)         const { return width() * height(); } // segment length (count) in physical pixels
-    inline uint16_t groupLength(void)    const { return grouping + spacing; }
+    inline uint16_t width(void)          const { return isActive() ? (stop - start) : 0; }         // segment width in physical pixels (length if 1D)
+    inline uint16_t height(void)         const { return (stopY > startY) ? (stopY - startY) : 0; } // segment height (if 2D) in physical pixels // WLEDMM make sure its always > 0
+    inline uint16_t length(void)         const { return width() * height(); }     // segment length (count) in physical pixels
+    inline uint16_t groupLength(void)    const { return max(1, grouping + spacing); } // WLEDMM length = 0 could lead to div/0 in virtualWidth() and virtualHeight()
     inline uint8_t  getLightCapabilities(void) const { return _capabilities; }
 
-    static uint16_t getUsedSegmentData(void)    { return _usedSegmentData; }
+    static size_t   getUsedSegmentData(void)    { return _usedSegmentData; } // WLEDMM size_t
     static void     addUsedSegmentData(int len) { _usedSegmentData += len; }
 
     void    allocLeds(); //WLEDMM
@@ -545,7 +558,7 @@ typedef struct Segment {
     void    refreshLightCapabilities(void);
 
     // runtime data functions
-    inline uint16_t dataSize(void) const { return _dataLen; }
+    inline size_t dataSize(void) const { return _dataLen; }
     bool allocateData(size_t len);
     void deallocateData(void);
     void resetIfRequired(void);
@@ -576,7 +589,7 @@ typedef struct Segment {
     void setPixelColor(float i, uint32_t c, bool aa = true);
     void setPixelColor(float i, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0, bool aa = true) { setPixelColor(i, RGBW32(r,g,b,w), aa); }
     void setPixelColor(float i, CRGB c, bool aa = true)                                         { setPixelColor(i, RGBW32(c.r,c.g,c.b,0), aa); }
-    uint32_t getPixelColor(int i);
+    uint32_t __attribute__((pure)) getPixelColor(int i);  // WLEDMM attribute added
     // 1D support functions (some implement 2D as well)
     void blur(uint8_t);
     void fill(uint32_t c);
@@ -589,24 +602,42 @@ typedef struct Segment {
     void addPixelColor(int n, CRGB c, bool fast = false)          { addPixelColor(n, RGBW32(c.r,c.g,c.b,0), fast); } // automatically inline
     void fadePixelColor(uint16_t n, uint8_t fade);
     uint8_t get_random_wheel_index(uint8_t pos);
-    uint32_t color_from_palette(uint16_t, bool mapping, bool wrap, uint8_t mcol, uint8_t pbri = 255);
-    uint32_t color_wheel(uint8_t pos);
+	  uint32_t __attribute__((pure)) color_from_palette(uint_fast16_t, bool mapping, bool wrap, uint8_t mcol, uint8_t pbri = 255);
+    uint32_t __attribute__((pure)) color_wheel(uint8_t pos);
 
     // 2D matrix
-    uint16_t virtualWidth(void)  const;
-    uint16_t virtualHeight(void) const;
+    inline uint16_t virtualWidth() const {  // WLEDMM use fast types, and make function inline
+      uint_fast16_t groupLen = groupLength();
+      uint_fast16_t vWidth = ((transpose ? height() : width()) + groupLen - 1) / groupLen;
+      if (mirror) vWidth = (vWidth + 1) /2;  // divide by 2 if mirror, leave at least a single LED
+      return vWidth;
+    }
+    inline uint16_t virtualHeight() const {  // WLEDMM use fast types, and make function inline
+      uint_fast16_t groupLen = groupLength();
+      uint_fast16_t vHeight = ((transpose ? width() : height()) + groupLen - 1) / groupLen;
+      if (mirror_y) vHeight = (vHeight + 1) /2;  // divide by 2 if mirror, leave at least a single LED
+      return vHeight;
+    }
+
     uint16_t nrOfVStrips(void) const;
     void createjMap(); //WLEDMM jMap
     void deletejMap(); //WLEDMM jMap
+  
   #ifndef WLED_DISABLE_2D
-    uint16_t XY(uint16_t x, uint16_t y); // support function to get relative index within segment (for leds[])
+    inline uint16_t XY(uint_fast16_t x, uint_fast16_t y) { // support function to get relative index within segment (for leds[]) // WLEDMM inline for speed
+      uint_fast16_t width  = virtualWidth();   // segment width in logical pixels
+      uint_fast16_t height = virtualHeight();  // segment height in logical pixels
+      if (width == 0) return 0;           // softhack007 avoid div/0
+      if (height == 0) return (x%width);  // softhack007 avoid div/0
+      return (x%width) + (y%height) * width;
+    }
     void setPixelColorXY(int x, int y, uint32_t c); // set relative pixel within segment with color
     void setPixelColorXY(int x, int y, byte r, byte g, byte b, byte w = 0) { setPixelColorXY(x, y, RGBW32(r,g,b,w)); } // automatically inline
     void setPixelColorXY(int x, int y, CRGB c)                             { setPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0)); } // automatically inline
-    void setPixelColorXY(float x, float y, uint32_t c, bool aa = true);
+    void setPixelColorXY(float x, float y, uint32_t c, bool aa = true, bool fast = true);
     void setPixelColorXY(float x, float y, byte r, byte g, byte b, byte w = 0, bool aa = true) { setPixelColorXY(x, y, RGBW32(r,g,b,w), aa); }
     void setPixelColorXY(float x, float y, CRGB c, bool aa = true)                             { setPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0), aa); }
-    uint32_t getPixelColorXY(uint16_t x, uint16_t y);
+    uint32_t __attribute__((pure)) getPixelColorXY(uint16_t x, uint16_t y);   // WLEDMM attribute pure
     // 2D support functions
     void blendPixelColorXY(uint16_t x, uint16_t y, uint32_t color, uint8_t blend);
     void blendPixelColorXY(uint16_t x, uint16_t y, CRGB c, uint8_t blend)  { blendPixelColorXY(x, y, RGBW32(c.r,c.g,c.b,0), blend); }
@@ -702,11 +733,11 @@ class WS2812FX {  // 96 bytes
       _length(DEFAULT_LED_COUNT),
       _brightness(DEFAULT_BRIGHTNESS),
       _transitionDur(750),
-      _targetFps(WLED_FPS),
-      _frametime(FRAMETIME_FIXED),
+      _targetFps(WLED_FPS_SLOW),        // WLEDMM
+      _frametime(FRAMETIME_FIXED_SLOW), // WLEDMM
       _cumulativeFps(2),
 #ifdef ARDUINO_ARCH_ESP32
-      _cumulativeFps500(2*500),      // WLEDMM more accurate FPS measurement for ESP32
+      _cumulativeFps500(2*500),          // WLEDMM more accurate FPS measurement for ESP32
       _lastShow500(0),
 #endif
       _isServicing(true),            // WLEDMM start with "true" - flag will be reset by strip.finalizeInit()
@@ -730,9 +761,9 @@ class WS2812FX {  // 96 bytes
     }
 
     ~WS2812FX() {
-      //#ifdef WLED_DEBUG
+      #ifdef WLED_DEBUG
       if (Serial) Serial.println(F("~WS2812FX destroying strip.")); // WLEDMM can't use DEBUG_PRINTLN here
-      //#endif
+      #endif
       if (customMappingTable) delete[] customMappingTable;
       _mode.clear();
       _modeData.clear();
@@ -821,7 +852,7 @@ class WS2812FX {  // 96 bytes
       ablMilliampsMax,
       currentMilliamps,
       getLengthPhysical(void),
-      getLengthTotal(void), // will include virtual/nonexistent pixels in matrix
+      __attribute__((pure)) getLengthTotal(void), // will include virtual/nonexistent pixels in matrix //WLEDMM attribute added
       getFps();
 
     inline uint16_t getFrameTime(void) { return _frametime; }
@@ -831,8 +862,8 @@ class WS2812FX {  // 96 bytes
 
     uint32_t
       now,
-      timebase,
-      getPixelColor(uint16_t);
+      timebase;
+    uint32_t __attribute__((pure)) getPixelColor(uint_fast16_t);   // WLEDMM attribute pure = does not have side-effects
 
     inline uint32_t getLastShow(void) { return _lastShow; }
     inline uint32_t segColor(uint8_t i) { return _colors_t[i]; }

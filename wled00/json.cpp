@@ -48,15 +48,18 @@
 
 static bool inDeepCall = false; // WLEDMM needed so that recursive deserializeSegment() does not remove locks too early
 
+// WLEDMM caution - this function may run outside of arduino loop context (async_tcp with priority=3)
 bool deserializeSegment(JsonObject elem, byte it, byte presetId)
 {
   const bool iAmGroot = !inDeepCall;  // WLEDMM will only be true if this is the toplevel of the recursion.
   //WLEDMM add USER_PRINT
+  #ifdef WLED_DEBUG
   if (elem.size()!=1 || elem["stop"] != 0) { // not for {"stop":0}
     String temp;
     serializeJson(elem, temp);
     USER_PRINTF("deserializeSegment %s\n", temp.c_str());
   }
+  #endif
 
   byte id = elem["id"] | it;
   if (id >= strip.getMaxSegments()) return false;
@@ -100,7 +103,7 @@ bool deserializeSegment(JsonObject elem, byte it, byte presetId)
 
   uint16_t start = elem["start"] | seg.start;
   if (stop < 0) {
-    uint16_t len = elem["len"];
+    int len = elem["len"]; // WLEDMM bugfix for broken presets with len < 0
     stop = (len > 0) ? start + len : seg.stop;
   }
   // 2D segments
@@ -113,7 +116,7 @@ bool deserializeSegment(JsonObject elem, byte it, byte presetId)
     elem.remove("id");  // remove for recursive call
     elem.remove("rpt"); // remove for recursive call
     elem.remove("n");   // remove for recursive call
-    uint16_t len = stop - start;
+    uint16_t len = (stop >= start) ? (stop - start) : 0;  // WLEDMM stop < 1 is allowed, so we need to avoid underflow
     for (size_t i=id+1; i<strip.getMaxSegments(); i++) {
       start = start + len;
       if (start >= strip.getLengthTotal()) break;
@@ -368,13 +371,16 @@ bool deserializeSegment(JsonObject elem, byte it, byte presetId)
 
 // deserializes WLED state (fileDoc points to doc object if called from web server)
 // presetId is non-0 if called from handlePreset()
+// WLEDMM caution - this function may run outside of arduino loop context (async_tcp with priority=3)
 bool deserializeState(JsonObject root, byte callMode, byte presetId)
 {
   const bool iAmGroot = !inDeepCall;  // WLEDMM will only be true if this is the toplevel of the recursion.
   //WLEDMM add USER_PRINT
+  #ifdef WLED_DEBUG
   String temp;
   serializeJson(root, temp);
   USER_PRINTF("deserializeState %s\n", temp.c_str());
+  #endif
 
   bool stateResponse = root[F("v")] | false;
 
@@ -418,6 +424,10 @@ bool deserializeState(JsonObject root, byte callMode, byte presetId)
       transitionDelayTemp = transitionDelay;
     }
   }
+
+#ifdef ARDUINO_ARCH_ESP32
+  delay(2); // WLEDMM experimental - de-serialize takes time, so allow other tasks to run
+#endif
 
   // WLEDMM: before changing strip, make sure our strip is _not_ servicing effects in parallel
   suspendStripService = true; // temporarily lock out strip updates
@@ -592,7 +602,7 @@ void serializeSegment(JsonObject& root, Segment& seg, byte id, bool forPreset, b
       root[F("stopY")]  = seg.stopY;
     }
   }
-  if (!forPreset) root["len"] = seg.stop - seg.start;
+  if (!forPreset) root["len"] = (seg.stop >= seg.start) ? (seg.stop - seg.start) : 0; // WLEDMM correct handling for stop=0
   root["grp"]    = seg.grouping;
   root[F("spc")] = seg.spacing;
   root[F("of")]  = seg.offset;

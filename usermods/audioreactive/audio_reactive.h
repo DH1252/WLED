@@ -254,7 +254,11 @@ constexpr SRate_t SAMPLE_RATE = 22050;        // Base sample rate in Hz - 22Khz 
 //constexpr SRate_t SAMPLE_RATE = 16000;        // 16kHz - use if FFTtask takes more than 20ms. Physical sample time -> 32ms
 //constexpr SRate_t SAMPLE_RATE = 20480;        // Base sample rate in Hz - 20Khz is experimental.    Physical sample time -> 25ms
 //constexpr SRate_t SAMPLE_RATE = 10240;        // Base sample rate in Hz - previous default.         Physical sample time -> 50ms
+#ifndef WLEDMM_FASTPATH
 #define FFT_MIN_CYCLE 21                      // minimum time before FFT task is repeated. Use with 22Khz sampling
+#else
+#define FFT_MIN_CYCLE 15                      // reduce min time, to allow faster catch-up when I2S is lagging 
+#endif
 //#define FFT_MIN_CYCLE 30                      // Use with 16Khz sampling
 //#define FFT_MIN_CYCLE 23                      // minimum time before FFT task is repeated. Use with 20Khz sampling
 //#define FFT_MIN_CYCLE 46                      // minimum time before FFT task is repeated. Use with 10Khz sampling
@@ -794,7 +798,7 @@ static void detectSamplePeak(void) {
 
 #if 0
   // alternate detection, based on FFT_MajorPeak and FFT_Magnitude. Not much better...
-  if ((binNum > 0)  && (maxVol > 8) && (binNum < 10) && (sampleAgc > 127) && 
+  if ((binNum > 1)  && (maxVol > 8) && (binNum < 10) && (sampleAgc > 127) && 
       (FFT_MajorPeak > 50) && (FFT_MajorPeak < 250) && (FFT_Magnitude > (16.0f * (maxVol+42.0)) /*my_magnitude > 136.0f*16.0f*/) && 
       (millis() - timeOfPeak > 80)) {
     havePeak = true;
@@ -904,7 +908,6 @@ class AudioReactive : public Usermod {
 
     // variables  for UDP sound sync
     WiFiUDP fftUdp;               // UDP object for sound sync (from WiFi UDP, not Async UDP!)
-    uint8_t fftUdpBuffer[UDPSOUND_MAX_PACKET+1] = { 0 }; // static buffer for receiving
     unsigned long lastTime = 0;   // last time of running UDP Microphone Sync
     const uint16_t delayMs = 10;  // I don't want to sample too often and overload WLED
     uint16_t audioSyncPort= 11988;// default port for UDP sound sync
@@ -1134,8 +1137,13 @@ class AudioReactive : public Usermod {
     {
       float    sampleAdj;           // Gain adjusted sample value
       float    tmpSample;           // An interim sample variable used for calculatioins.
+#ifdef WLEDMM_FASTPATH
+      constexpr float weighting = 0.35f;  // slightly reduced filter strength, to reduce audio latency
+      constexpr float weighting2 = 0.25f;
+#else
       const float weighting = 0.2f; // Exponential filter weighting. Will be adjustable in a future release.
       const float weighting2 = 0.073f; // Exponential filter weighting, for rising signal (a bit more robust against spikes)
+#endif
       const int   AGC_preset = (soundAgc > 0)? (soundAgc-1): 0; // make sure the _compiler_ knows this value will not change while we are inside the function
       static bool isFrozen = false;
       static bool haveSilence = true;
@@ -1218,7 +1226,7 @@ class AudioReactive : public Usermod {
         sampleMax = sampleMax + 0.5f * (sampleReal - sampleMax);  // new peak - with some filtering
 #if 1
         // another simple way to detect samplePeak - cannot detect beats, but reacts on peak volume
-        if (((binNum < 11) || (maxVol < 1)) && (millis() - timeOfPeak > 80) && (sampleAvg > 1)) {
+        if (((binNum < 12) || ((maxVol < 1))) && (millis() - timeOfPeak > 80) && (sampleAvg > 1)) {
           samplePeak    = true;
           timeOfPeak    = millis();
           udpSamplePeak = true;
@@ -1371,9 +1379,10 @@ class AudioReactive : public Usermod {
       transmitData.FFT_Magnitude = my_magnitude;
       transmitData.FFT_MajorPeak = FFT_MajorPeak;
 
-      fftUdp.beginMulticastPacket();
-      fftUdp.write(reinterpret_cast<uint8_t *>(&transmitData), sizeof(transmitData));
-      fftUdp.endPacket();
+      if (fftUdp.beginMulticastPacket() != 0) { // beginMulticastPacket returns 0 in case of error
+        fftUdp.write(reinterpret_cast<uint8_t *>(&transmitData), sizeof(transmitData));
+        fftUdp.endPacket();
+      }
       return;
     } // transmitAudioData()
 
@@ -1441,9 +1450,24 @@ class AudioReactive : public Usermod {
       if (!udpSyncConnected) return false;
       bool haveFreshData = false;
 
-      size_t packetSize = fftUdp.parsePacket();
+      size_t packetSize = 0;
+      // WLEDMM use exception handler to catch out-of-memory errors
+      #if __cpp_exceptions
+        try{
+          packetSize = fftUdp.parsePacket();
+        } catch(...) {
+          packetSize = 0; // low heap memory -> discard packet.
+          fftUdp.flush();
+          DEBUG_PRINTLN(F("receiveAudioData: parsePacket out of memory exception caught!"));
+          USER_FLUSH();
+        }
+      #else
+        packetSize = fftUdp.parsePacket();
+      #endif
+
       if ((packetSize > 0) && ((packetSize < 5) || (packetSize > UDPSOUND_MAX_PACKET))) fftUdp.flush(); // discard invalid packets (too small or too big)
       if ((packetSize > 5) && (packetSize <= UDPSOUND_MAX_PACKET)) {
+        static uint8_t fftUdpBuffer[UDPSOUND_MAX_PACKET+1] = { 0 }; // static buffer for receiving, to reuse the same memory and avoid heap fragmentation
         //DEBUGSR_PRINTLN("Received UDP Sync Packet");
         fftUdp.read(fftUdpBuffer, packetSize);
 
@@ -1738,7 +1762,11 @@ class AudioReactive : public Usermod {
 
         // get AGC sensitivity and sound pressure
         static unsigned long lastEstimate = 0;
+#ifdef WLEDMM_FASTPATH
+        if (millis() - lastEstimate > 7) {
+#else
         if (millis() - lastEstimate > 12) {
+#endif
           lastEstimate = millis();
           agcSensitivity = getSensitivity();
           if (limiterOn)
@@ -1763,6 +1791,8 @@ class AudioReactive : public Usermod {
             have_new_sample = receiveAudioData();
             if (have_new_sample) last_UDPTime = millis();
             lastTime = millis();
+          } else {
+            fftUdp.flush(); // WLEDMM: Flush this if we haven't read it.
           }
           if (have_new_sample) syncVolumeSmth = volumeSmth;   // remember received sample
           else volumeSmth = syncVolumeSmth;                   // restore originally received sample for next run of dynamics limiter

@@ -9,6 +9,8 @@
 #include "bus_wrapper.h"
 #include "bus_manager.h"
 
+//WLEDMM: #define DEBUGOUT(x) netDebugEnabled?NetDebug.print(x):Serial.print(x) not supported in this file as netDebugEnabled not in scope
+#if 0
 //colors.cpp
 uint32_t colorBalanceFromKelvin(uint16_t kelvin, uint32_t rgb);
 uint16_t approximateKelvinFromRGB(uint32_t rgb);
@@ -18,7 +20,6 @@ void colorRGBtoRGBW(byte* rgb);
 uint8_t realtimeBroadcast(uint8_t type, IPAddress client, uint16_t length, byte *buffer, uint8_t bri=255, bool isRGBW=false);
 
 // enable additional debug output
-//WLEDMM: #define DEBUGOUT(x) netDebugEnabled?NetDebug.print(x):Serial.print(x) not supported in this file as netDebugEnabled not in scope
 #if defined(WLED_DEBUG_HOST)
   #include "net_debug.h"
   #define DEBUGOUT NetDebug
@@ -37,6 +38,10 @@ uint8_t realtimeBroadcast(uint8_t type, IPAddress client, uint16_t length, byte 
   #define DEBUG_PRINT(x)
   #define DEBUG_PRINTLN(x)
   #define DEBUG_PRINTF(x...)
+#endif
+#else
+ // WLEDMM use wled.h
+#include "wled.h"
 #endif
 
 //color mangling macros
@@ -116,7 +121,11 @@ BusDigital::BusDigital(BusConfig &bc, uint8_t nr, const ColorOrderMap &com) : Bu
   _busPtr = PolyBus::create(_iType, _pins, lenToCreate, nr, _frequencykHz);
   _valid = (_busPtr != nullptr);
   _colorOrder = bc.colorOrder;
-  DEBUG_PRINTF("%successfully inited strip %u (len %u) with type %u and pins %u,%u (itype %u)\n", _valid?"S":"Uns", nr, _len, bc.type, _pins[0],_pins[1],_iType);
+  if (_pins[1] != 255) {  // WLEDMM USER_PRINTF
+    USER_PRINTF("%successfully inited strip %u (len %u) with type %u and pins %u,%u (itype %u)\n", _valid?"S":"Uns", nr, _len, bc.type, _pins[0],_pins[1],_iType);
+  } else {
+    USER_PRINTF("%successfully inited strip %u (len %u) with type %u and pin %u (itype %u)\n", _valid?"S":"Uns", nr, _len, bc.type, _pins[0],_iType);
+  }
 }
 
 void BusDigital::show() {
@@ -414,7 +423,9 @@ BusNetwork::BusNetwork(BusConfig &bc) : Bus(bc.type, bc.start, bc.autoWhite) {
 void BusNetwork::setPixelColor(uint16_t pix, uint32_t c) {
   if (!_valid || pix >= _len) return;
   if (hasWhite()) c = autoWhiteCalc(c);
+#if !defined(WLEDMM_FASTPATH) // WLEDMM expensive operation
   if (_cct >= 1900) c = colorBalanceFromKelvin(_cct, c); //color correction from CCT
+#endif
   uint16_t offset = pix * _UDPchannels;
   _data[offset]   = R(c);
   _data[offset+1] = G(c);
@@ -508,9 +519,9 @@ void BusManager::setStatusPixel(uint32_t c) {
 }
 
 void IRAM_ATTR BusManager::setPixelColor(uint16_t pix, uint32_t c, int16_t cct) {
-  for (uint8_t i = 0; i < numBusses; i++) {
+  for (uint_fast8_t i = 0; i < numBusses; i++) {    // WLEDMM use fast native types
     Bus* b = busses[i];
-    uint16_t bstart = b->getStart();
+    uint_fast16_t bstart = b->getStart();
     if (pix < bstart || pix >= bstart + b->getLength()) continue;
     busses[i]->setPixelColor(pix - bstart, c);
   }
@@ -531,10 +542,10 @@ void BusManager::setSegmentCCT(int16_t cct, bool allowWBCorrection) {
   Bus::setCCT(cct);
 }
 
-uint32_t BusManager::getPixelColor(uint16_t pix) {
-  for (uint8_t i = 0; i < numBusses; i++) {
+uint32_t BusManager::getPixelColor(uint_fast16_t pix) {     // WLEDMM use fast native types
+  for (uint_fast8_t i = 0; i < numBusses; i++) {
     Bus* b = busses[i];
-    uint16_t bstart = b->getStart();
+    uint_fast16_t bstart = b->getStart();
     if (pix < bstart || pix >= bstart + b->getLength()) continue;
     return b->getPixelColor(pix - bstart);
   }
@@ -555,8 +566,8 @@ Bus* BusManager::getBus(uint8_t busNr) {
 
 //semi-duplicate of strip.getLengthTotal() (though that just returns strip._length, calculated in finalizeInit())
 uint16_t BusManager::getTotalLength() {
-  uint16_t len = 0;
-  for (uint8_t i=0; i<numBusses; i++) len += busses[i]->getLength();
+  uint_fast16_t len = 0;
+  for (uint_fast8_t i=0; i<numBusses; i++) len += busses[i]->getLength();      // WLEDMM use fast native types
   return len;
 }
 
