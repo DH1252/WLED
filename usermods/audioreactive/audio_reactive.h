@@ -1493,13 +1493,19 @@ class AudioReactive : public Usermod {
       return strncmp_P(header, UDP_SYNC_HEADER_v1, 6) == 0;
     }
 
-    void decodeAudioData(int packetSize, uint8_t *fftBuff) {
+    bool decodeAudioData(int packetSize, uint8_t *fftBuff) {
+      if((0 == packetSize) || (nullptr == fftBuff)) return false; // sanity check
       audioSyncPacket *receivedPacket = reinterpret_cast<audioSyncPacket*>(fftBuff);
 
+      // validate sequence, discard out-of-sequence packets
       static uint8_t lastFrameCounter = 0;
-      if(receivedPacket->frameCounter <= lastFrameCounter && receivedPacket->frameCounter != 0) { // TODO: might need extra checks here
+      bool sequenceOK = false;
+      if(receivedPacket->frameCounter > lastFrameCounter) sequenceOK = true;                  // sequence OK
+      if((lastFrameCounter < 12) && (receivedPacket->frameCounter > 248)) sequenceOK = false; // prevent sequence "roll-back" due to late packets (1->254)
+      if((lastFrameCounter > 248) && (receivedPacket->frameCounter < 12)) sequenceOK = true;  // handle roll-over (255 -> 0)
+      if((sequenceOK == false) && (receivedPacket->frameCounter != 0)) {                      // always accept "0" - its the legacy value
         DEBUGSR_PRINTF("Skipping audio frame out of order or duplicated - %u vs %u\n", lastFrameCounter, receivedPacket->frameCounter);
-        return;
+        return false;   // reject out-of sequence frame
       }
       else {
         lastFrameCounter = receivedPacket->frameCounter;
@@ -1529,6 +1535,7 @@ class AudioReactive : public Usermod {
       my_magnitude  = fmaxf(receivedPacket->FFT_Magnitude, 0.0f);
       FFT_Magnitude = my_magnitude;
       FFT_MajorPeak = constrain(receivedPacket->FFT_MajorPeak, 1.0f, 11025.0f);  // restrict value to range expected by effects
+      return true;
     }
 
     void decodeAudioData_v1(int packetSize, uint8_t *fftBuff) {
@@ -1591,9 +1598,8 @@ class AudioReactive : public Usermod {
 
         // VERIFY THAT THIS IS A COMPATIBLE PACKET
         if (packetSize == sizeof(audioSyncPacket) && (isValidUdpSyncVersion((const char *)fftUdpBuffer))) {
-          decodeAudioData(packetSize, fftUdpBuffer);
+          haveFreshData = decodeAudioData(packetSize, fftUdpBuffer);
           //DEBUGSR_PRINTLN("Finished parsing UDP Sync Packet v2");
-          haveFreshData = true;
           receivedFormat = 2;
         } else {
           if (packetSize == sizeof(audioSyncPacket_v1) && (isValidUdpSyncVersion_v1((const char *)fftUdpBuffer))) {
@@ -1745,6 +1751,23 @@ class AudioReactive : public Usermod {
           DEBUGSR_PRINTLN(F("AR: ES8388 Source (Line-In)"));
         #endif
           audioSource = new ES8388Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
+          //useInputFilter = 0; // to disable low-cut software filtering and restore previous behaviour
+          delay(100);
+          // WLEDMM align global pins
+          if ((sdaPin >= 0) && (i2c_sda < 0)) i2c_sda = sdaPin; // copy usermod prefs into globals (if globals not defined)
+          if ((sclPin >= 0) && (i2c_scl < 0)) i2c_scl = sclPin;
+          if (i2c_sda >= 0) sdaPin = -1;                        // -1 = use global
+          if (i2c_scl >= 0) sclPin = -1;
+
+          if (audioSource) audioSource->initialize(i2swsPin, i2ssdPin, i2sckPin, mclkPin);
+          break;
+        case 7:
+        #ifdef use_wm8978_mic
+          DEBUGSR_PRINTLN(F("AR: WM8978 Source (Mic)"));
+        #else
+          DEBUGSR_PRINTLN(F("AR: WM8978 Source (Line-In)"));
+        #endif
+          audioSource = new WM8978Source(SAMPLE_RATE, BLOCK_SIZE, 1.0f);
           //useInputFilter = 0; // to disable low-cut software filtering and restore previous behaviour
           delay(100);
           // WLEDMM align global pins
@@ -2562,7 +2585,11 @@ class AudioReactive : public Usermod {
       #else
         oappend(SET_F("addOption(dd,'ES8388 ☾',6);"));
       #endif
-
+      #if SR_DMTYPE==7
+        oappend(SET_F("addOption(dd,'WM8978 ☾ (⎌)',7);"));
+      #else
+        oappend(SET_F("addOption(dd,'WM8978 ☾',7);"));
+      #endif
       #ifdef SR_SQUELCH
         oappend(SET_F("addInfo('AudioReactive:config:squelch',1,'<i>&#9100; ")); oappendi(SR_SQUELCH); oappend("</i>');");  // 0 is field type, 1 is actual field
       #endif
