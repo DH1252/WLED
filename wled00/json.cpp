@@ -987,6 +987,7 @@ void serializeInfo(JsonObject root)
   root[F("freeheap")] = ESP.getFreeHeap();
   //WLEDMM: conditional on esp32
   #if defined(ARDUINO_ARCH_ESP32)
+    root[F("freestack")] = uxTaskGetStackHighWaterMark(NULL); //WLEDMM
     root[F("minfreeheap")] = ESP.getMinFreeHeap();
   #endif
   #if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM)
