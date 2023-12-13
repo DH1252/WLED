@@ -86,7 +86,7 @@ static float mapf(float x, float in_min, float in_max, float out_min, float out_
  */
 uint16_t mode_static(void) {
   SEGMENT.fill(SEGCOLOR(0));
-  return FRAMETIME_FIXED_SLOW;    // WLEDMM to ensure smooth color changes from DMX (PR #73)
+  return strip.isOffRefreshRequired() ? FRAMETIME : FRAMETIME_FIXED_SLOW; // WLEDMM to ensure smooth color changes from DMX (PR #73)
 }
 static const char _data_FX_MODE_STATIC[] PROGMEM = "Solid";
 
@@ -1722,7 +1722,7 @@ uint16_t mode_multi_comet(void) {
       }
       comets[i]++;
     } else {
-      if(!random(SEGLEN)) {
+      if(!random16(SEGLEN)) {
         comets[i] = 0;
       }
     }
@@ -1922,6 +1922,71 @@ uint16_t mode_pride_2015(void) {
 static const char _data_FX_MODE_PRIDE_2015[] PROGMEM = "Pride 2015@!;;";
 
 
+//////////////////////
+//       PARTYJERK        //
+//////////////////////
+// by  @tonyxforce
+// NB: This effects expects a palette that starts with black and then ramps up brightness. 
+//     Currently works best with the "color gradient" and the "colors 1&2" palettes
+uint16_t mode_partyjerk() {
+  if (SEGENV.call == 0) {
+    SEGMENT.fill(BLACK);    // clear LEDs
+    SEGENV.aux0 = 0;
+    SEGENV.aux1 = 0;
+    SEGENV.step = 0;
+  }
+  /*
+  * use of persistent variables:
+  * aux0: hueDelay
+  * aux1: hue
+  * step: pos
+  */
+
+  um_data_t *um_data;
+  if (!usermods.getUMData(&um_data, USERMOD_ID_AUDIOREACTIVE)) {
+    // add support for no audio
+    um_data = simulateSound(SEGMENT.soundSim);
+  }
+  float   volumeSmth = *(float*)  um_data->u_data[0];
+
+  SEGENV.aux0++;
+  if (SEGENV.aux1 > 254) {
+    SEGENV.aux1 = 0;
+  }
+  if (SEGENV.aux0 > map(SEGMENT.custom1, 0, 255, 0, 14)) {
+    SEGENV.aux0 = 0;
+    SEGENV.aux1++;
+  }
+
+  uint_fast32_t speed = 0;
+  uint16_t counter = 0;
+
+  if (volumeSmth * 2 > (255 - SEGMENT.intensity)) {
+    speed = SEGMENT.speed * map(SEGMENT.custom2, 0, 255, 0, 100);
+  } else {
+    speed = SEGMENT.speed;
+  };
+
+  SEGENV.step += speed;
+  counter = SEGENV.step >> 8;
+
+  for (unsigned i = 0; i < SEGLEN; i++) {
+    uint8_t colorIndex = ((i * 255) / SEGLEN) - counter;
+    uint32_t paletteColor = SEGMENT.color_from_palette(colorIndex, false, PALETTE_MOVING_WRAP, 255);
+    uint8_t r = R(paletteColor);
+    uint8_t g = G(paletteColor);
+    uint8_t b = B(paletteColor);
+    uint8_t activeColor = max(r, max(g, b));
+
+    CRGB rgb(CHSV(SEGENV.aux1, 255, activeColor));
+    SEGMENT.setPixelColor((uint16_t)i, rgb.r, rgb.g, rgb.b);
+  };
+
+  return FRAMETIME;
+} // mode_partyjerk()
+static const char _data_FX_MODE_PARTYJERK[] PROGMEM = "Party jerk@Effect speed,Sensitivity,Color change speed,Effect speed active multiplier;!,!;!;1v;c1=8,c2=48,m12=0,si=0";
+
+
 //eight colored dots, weaving in and out of sync with each other
 uint16_t mode_juggle(void) {
   if (SEGLEN == 1) return mode_static();
@@ -2009,7 +2074,7 @@ uint16_t mode_fire_2012() {
 
       // Step 1.  Cool down every cell a little
       for (int i = 0; i < SEGLEN; i++) {
-        uint8_t cool = (it != SEGENV.step) ? random8((((20 + SEGMENT.speed/3) * 16) / SEGLEN)+2) : random(4);
+        uint8_t cool = (it != SEGENV.step) ? random8((((20 + SEGMENT.speed/3) * 16) / SEGLEN)+2) : random8(4);
         uint8_t minTemp = (i<ignition) ? (ignition-i)/4 + 16 : 0;  // should not become black in ignition area
         uint8_t temp = qsub8(heat[i], cool);
         heat[i] = temp<minTemp ? minTemp : temp;
@@ -4022,6 +4087,7 @@ static const char _data_FX_MODE_PHASEDNOISE[] PROGMEM = "Phased Noise@!,!;!,!;!"
 
 
 uint16_t mode_twinkleup(void) {                 // A very short twinkle routine with fade-in and dual controls. By Andrew Tuline.
+  uint16_t prevSeed = random16_get_seed();      // save seed so we can restore it at the end of the function
   random16_set_seed(535);                       // The randomizer needs to be re-set each time through the loop in order for the same 'random' numbers to be the same each time through.
 
   for (int i = 0; i < SEGLEN; i++) {
@@ -4031,6 +4097,7 @@ uint16_t mode_twinkleup(void) {                 // A very short twinkle routine 
     SEGMENT.setPixelColor(i, color_blend(SEGCOLOR(1), SEGMENT.color_from_palette(random8()+strip.now/100, false, PALETTE_SOLID_WRAP, 0), pixBri));
   }
 
+  random16_set_seed(prevSeed); // restore original seed so other effects can use "random" PRNG
   return FRAMETIME;
 }
 static const char _data_FX_MODE_TWINKLEUP[] PROGMEM = "Twinkleup@!,Intensity;!,!;!;;m12=0";
@@ -4515,15 +4582,15 @@ class AuroraWave {
 
   public:
     void init(uint32_t segment_length, CRGB color) {
-      ttl = random(500, 1501);
+      ttl = random16(500, 1501);
       basecolor = color;
-      basealpha = random(60, 101) / (float)100;
+      basealpha = random8(60, 101) / (float)100;
       age = 0;
-      width = random(segment_length / 20, segment_length / W_WIDTH_FACTOR); //half of width to make math easier
+      width = random16(segment_length / 20, segment_length / W_WIDTH_FACTOR); //half of width to make math easier
       if (!width) width = 1;
-      center = random(101) / (float)100 * segment_length;
-      goingleft = random(0, 2) == 0;
-      speed_factor = (random(10, 31) / (float)100 * W_MAX_SPEED / 255);
+      center = random8(101) / (float)100 * segment_length;
+      goingleft = random8(0, 2) == 0;
+      speed_factor = (random8(10, 31) / (float)100 * W_MAX_SPEED / 255);
       alive = true;
     }
 
@@ -4608,7 +4675,7 @@ uint16_t mode_aurora(void) {
     waves = reinterpret_cast<AuroraWave*>(SEGENV.data);
 
     for (int i = 0; i < SEGENV.aux1; i++) {
-      waves[i].init(SEGLEN, CRGB(SEGMENT.color_from_palette(random8(), false, false, random(0, 3))));
+      waves[i].init(SEGLEN, CRGB(SEGMENT.color_from_palette(random8(), false, false, random8(0, 3))));
     }
   } else {
     waves = reinterpret_cast<AuroraWave*>(SEGENV.data);
@@ -4620,7 +4687,7 @@ uint16_t mode_aurora(void) {
 
     if(!(waves[i].stillAlive())) {
       //If a wave dies, reinitialize it starts over.
-      waves[i].init(SEGLEN, CRGB(SEGMENT.color_from_palette(random8(), false, false, random(0, 3))));
+      waves[i].init(SEGLEN, CRGB(SEGMENT.color_from_palette(random8(), false, false, random8(0, 3))));
     }
   }
 
@@ -5266,7 +5333,7 @@ uint16_t mode_2DLissajous(void) {            // By: Andrew Tuline
 
   return FRAMETIME;
 } // mode_2DLissajous()
-static const char _data_FX_MODE_2DLISSAJOUS[] PROGMEM = "Lissajous ☾@X frequency,Fade rate,,,Speed,,,☾ Smooth Style;!;!;2;;sx=64,c3=15";
+static const char _data_FX_MODE_2DLISSAJOUS[] PROGMEM = "Lissajous ☾@X frequency,Fade rate,,,Speed,,,☾ Smooth Style;!;!;2;sx=64,c3=15";
 
 
 ///////////////////////
@@ -5928,7 +5995,7 @@ uint16_t mode_2Dghostrider(void) {
       if (lighter->reg[i]) {
         lighter->lightersPosY[i] = lighter->gPosY;
         lighter->lightersPosX[i] = lighter->gPosX;
-        lighter->Angle[i] = lighter->gAngle + random(-10, 10);
+        lighter->Angle[i] = lighter->gAngle + ((int)random8(20) - 10);
         lighter->time[i] = 0;
         lighter->reg[i] = false;
       } else {
@@ -6863,7 +6930,7 @@ uint16_t mode_puddlepeak(void) {                // Puddlepeak. By Andrew Tuline.
 
   uint16_t size = 0;
   uint8_t fadeVal = map(SEGMENT.speed,0,255, 224, 254);
-  uint16_t pos = random(SEGLEN);                          // Set a random starting position.
+  uint16_t pos = random16(SEGLEN);                        // Set a random starting position.
 
   um_data_t *um_data;
   if (!usermods.getUMData(&um_data, USERMOD_ID_AUDIOREACTIVE)) {
@@ -8235,6 +8302,7 @@ void WS2812FX::setupEffectData() {
   // --- 1D audio effects ---
   addEffect(FX_MODE_PIXELS, &mode_pixels, _data_FX_MODE_PIXELS);
   addEffect(FX_MODE_PIXELWAVE, &mode_pixelwave, _data_FX_MODE_PIXELWAVE);
+  addEffect(FX_MODE_PARTYJERK, &mode_partyjerk, _data_FX_MODE_PARTYJERK);
   addEffect(FX_MODE_JUGGLES, &mode_juggles, _data_FX_MODE_JUGGLES);
   addEffect(FX_MODE_MATRIPIX, &mode_matripix, _data_FX_MODE_MATRIPIX);
   addEffect(FX_MODE_GRAVIMETER, &mode_gravimeter, _data_FX_MODE_GRAVIMETER);
