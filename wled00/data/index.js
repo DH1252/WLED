@@ -1107,7 +1107,7 @@ function ddpAll() {
 	callNode(lastinfo.ip, "cfg", {"hw":{"led":{"ins":ins}}}); //self
 }
 
-//curl -s -F "update=@/Users/ewoudwijma/Developer/GitHub/MoonModules/WLED/build_output/release/WLEDMM_0.14.0-b27.31_esp32_4MB_M.bin" 192.168.8.105/update >nul &
+//curl -s -F "update=@/Users/ewoudwijma/Developer/GitHub/MoonModules/WLED/build_output/release/WLEDMM_0.14.0-b28.35_esp32_4MB_M.bin" 192.168.8.105/update >nul &
 
 //WLEDMM
 function SuperSync() {
@@ -1384,7 +1384,7 @@ function toggleBubble(e)
 }
 
 // updates segment length upon input of segment values
-function updateLen(s, draw=true) //WLEDMM conditonally draw segment view
+function updateLen(s, draw=true) //WLEDMM conditionally draw segment view
 {
 	if (!gId(`seg${s}s`)) return;
 	var start = parseInt(gId(`seg${s}s`).value);
@@ -1978,9 +1978,9 @@ function readState(s,command=false)
 //      - For AC effects (id<128) 2 sliders and 3 colors and the palette will be shown
 //      - For SR effects (id>128) 5 sliders and 3 colors and the palette will be shown
 // If effective (@)
-//      - a ; seperates slider controls (left) from color controls (middle) and palette control (right)
+//      - a ; separates slider controls (left) from color controls (middle) and palette control (right)
 //      - if left, middle or right is empty no controls are shown
-//      - a , seperates slider controls (max 5) or color controls (max 3). Palette has only one value
+//      - a , separates slider controls (max 5) or color controls (max 3). Palette has only one value
 //      - a ! means that the default is used.
 //             - For sliders: Effect speeds, Effect intensity, Custom 1, Custom 2, Custom 3
 //             - For colors: Fx color, Background color, Custom

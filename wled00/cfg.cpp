@@ -83,7 +83,7 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
 
   noWifiSleep = doc[F("wifi")][F("sleep")] | !noWifiSleep; // inverted
   noWifiSleep = !noWifiSleep;
-  //int wifi_phy = doc[F("wifi")][F("phy")]; //force phy mode n?
+  force802_3g = doc[F("wifi")][F("phy")] | force802_3g; //force phy mode g?
 
   JsonObject hw = doc[F("hw")];
 
@@ -337,7 +337,7 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
   PinManagerPinType i2c[2] = { { i2c_sda, true }, { i2c_scl, true } };
   if (i2c_scl >= 0 && i2c_sda >= 0 && pinManager.allocateMultiplePins(i2c, 2, PinOwner::HW_I2C)) {
     #ifdef ESP32
-    Wire.setPins(i2c_sda, i2c_scl); // this will fail if Wire is initilised (Wire.begin() called prior)
+    Wire.setPins(i2c_sda, i2c_scl); // this will fail if Wire is initialised (Wire.begin() called prior)
     #endif
     // Wire.begin(); // WLEDMM moved into pinManager
     DEBUG_PRINTF("pinmgr success for global i2c %d %d\n", i2c_sda, i2c_scl);
@@ -365,7 +365,7 @@ bool deserializeConfig(JsonObject doc, bool fromFS) {
   JsonObject light = doc[F("light")];
   byte prev; //WLEDMM
   int tdd; //WLEDMM
-  if (!light.isNull()) { //WLEDMM: in case cfg string does not contain light! (solves issue that somethimes gamma correction dissappears)
+  if (!light.isNull()) { //WLEDMM: in case cfg string does not contain light! (solves issue that sometimes gamma correction dissappears)
     CJSON(briMultiplier, light[F("scale-bri")]);
     CJSON(strip.paletteBlend, light[F("pal-mode")]);
     CJSON(autoSegments, light[F("aseg")]);
@@ -735,7 +735,7 @@ void serializeConfig() {
 
   JsonObject wifi = doc.createNestedObject("wifi");
   wifi[F("sleep")] = !noWifiSleep;
-  //wifi[F("phy")] = 1;
+  wifi[F("phy")] = (int)force802_3g;
 
   #ifdef WLED_USE_ETHERNET
   JsonObject ethernet = doc.createNestedObject("eth");

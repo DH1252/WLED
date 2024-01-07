@@ -46,6 +46,7 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
     if (passlen == 0 || (passlen > 7 && !isAsterisksOnly(request->arg(F("AP")).c_str(), 65))) strlcpy(apPass, request->arg(F("AP")).c_str(), 65);
     int t = request->arg(F("AC")).toInt(); if (t > 0 && t < 14) apChannel = t;
 
+    force802_3g = request->hasArg(F("FG"));
     noWifiSleep = request->hasArg(F("WS"));
 
     #ifndef WLED_DISABLE_ESPNOW
@@ -186,7 +187,7 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
     }
     busses.updateColorOrderMap(com);
 
-    // upate other pins
+    // update other pins
     int hw_ir_pin = request->arg(F("IR")).toInt();
     if (pinManager.allocatePin(hw_ir_pin,false, PinOwner::IR)) {
       irPin = hw_ir_pin;
@@ -609,7 +610,7 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
       i2c_scl = hw_scl_pin;
       DEBUG_PRINTF("handleSettingsSet(): reserved I2C pins SDA=%d SCL=%d.\n", i2c_sda, i2c_scl);
       #ifdef ESP32
-      Wire.setPins(i2c_sda, i2c_scl); // this will fail if Wire is initilised (Wire.begin() called)
+      Wire.setPins(i2c_sda, i2c_scl); // this will fail if Wire is initialised (Wire.begin() called)
       #endif
       // Wire.begin(); // WLEDMM moved into pinManager
     } else {
@@ -710,10 +711,10 @@ void handleSettingsSet(AsyncWebServerRequest *request, byte subPage)
         DEBUG_PRINTLN(value);
       } else {
         // we are using a hidden field with the same name as our parameter (!before the actual parameter!)
-        // to describe the type of parameter (text,float,int), for boolean patameters the first field contains "off"
+        // to describe the type of parameter (text,float,int), for boolean parameters the first field contains "off"
         // so checkboxes have one or two fields (first is always "false", existence of second depends on checkmark and may be "true")
         if (subObj[name].isNull()) {
-          // the first occurence of the field describes the parameter type (used in next loop)
+          // the first occurrence of the field describes the parameter type (used in next loop)
           if (value == "false") subObj[name] = false; // checkboxes may have only one field
           else                  subObj[name] = value;
         } else {
