@@ -1,4 +1,25 @@
 #pragma once
+
+/* 
+   @title     MoonModules WLED - audioreactive usermod
+   @file      audio_source.h
+   @repo      https://github.com/MoonModules/WLED, submit changes to this file as PRs to MoonModules/WLED
+   @Authors   https://github.com/MoonModules/WLED/commits/mdev/
+   @Copyright © 2024 Github MoonModules Commit Authors (contact moonmodules@icloud.com for details)
+   @license   GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007
+
+     This file is part of the MoonModules WLED fork also known as "WLED-MM".
+     WLED-MM is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License 
+     as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+     WLED-MM is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied 
+     warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+     
+     You should have received a copy of the GNU General Public License along with WLED-MM. If not, see <https://www.gnu.org/licenses/>.
+
+*/
+
+
 #ifdef ARDUINO_ARCH_ESP32
 #include <Wire.h>
 #include "wled.h"
@@ -185,8 +206,12 @@ class I2SSource : public AudioSource {
         .communication_format = i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S),
         //.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
 #ifdef WLEDMM_FASTPATH
+      #if CONFIG_IDF_TARGET_ESP32 && !defined(BOARD_HAS_PSRAM)          // still need to test on boards with PSRAM
+        .intr_alloc_flags = ESP_INTR_FLAG_IRAM|ESP_INTR_FLAG_LEVEL2|ESP_INTR_FLAG_LEVEL3,  // IRAM flag reduces missed samples
+      #else
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL2|ESP_INTR_FLAG_LEVEL3,  // seems to reduce noise
-        .dma_buf_count = 28,                                            // 160ms buffer (128 * dma_buf_count / sampleRate)
+      #endif
+        .dma_buf_count = 24,                                            // 140ms buffer (128 * dma_buf_count / sampleRate)
 #else
         .intr_alloc_flags = ESP_INTR_FLAG_LEVEL2,
         .dma_buf_count = 8,
@@ -649,7 +674,13 @@ class WM8978Source : public I2SSource {
       _wm8978I2cWrite( 1,0b000111110); // Power Management 1 - power off most things, but enable mic bias and I/O tie-off to help mitigate mic leakage.
       _wm8978I2cWrite( 2,0b110111111); // Power Management 2 - enable output and amp stages (amps may lift signal but it works better on the ADCs)
       _wm8978I2cWrite( 3,0b000001100); // Power Management 3 - enable L&R output mixers
+
+      #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 2, 0)
       _wm8978I2cWrite( 4,0b001010000); // Audio Interface - standard I2S, 24-bit
+      #else
+      _wm8978I2cWrite( 4,0b001001000); // Audio Interface - left-justified I2S, 24-bit
+      #endif
+      
       _wm8978I2cWrite( 6,0b000000000); // Clock generation control - use external mclk
       _wm8978I2cWrite( 7,0b000000100); // Sets sample rate to ~24kHz (only used for internal calculations, not I2S)
       _wm8978I2cWrite(14,0b010001000); // 128x ADC oversampling - high pass filter disabled as it kills the bass response

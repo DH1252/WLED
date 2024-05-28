@@ -62,14 +62,15 @@ void wsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventTyp
         }
         releaseJSONBufferLock(); // will clean fileDoc
 
-        // force broadcast in 500ms after updating client
-        if (verboseResponse) {
-          sendDataWs(client);
-          lastInterfaceUpdate = millis() - (INTERFACE_UPDATE_COOLDOWN -500);
-        } else {
-          // we have to send something back otherwise WS connection closes
-          client->text(F("{\"success\":true}"));
-          lastInterfaceUpdate = millis() - (INTERFACE_UPDATE_COOLDOWN -500);
+        if (!interfaceUpdateCallMode) { // individual client response only needed if no WS broadcast soon
+          if (verboseResponse) {
+            sendDataWs(client);
+          } else {
+            // we have to send something back otherwise WS connection closes
+            client->text(F("{\"success\":true}"));
+          }
+          // force broadcast in 500ms after updating client
+          //lastInterfaceUpdate = millis() - (INTERFACE_UPDATE_COOLDOWN -500); // ESP8266 does not like this
         }
       }
     } else {
@@ -161,6 +162,7 @@ void sendDataWs(AsyncWebSocketClient * client)
     ws.closeAll(1013); //code 1013 = temporary overload, try again later
     ws.cleanupClients(0); //disconnect all clients to release memory
     ws._cleanBuffers();
+    errorFlag = ERR_LOW_WS_MEM;
     return; //out of memory
   }
 
@@ -184,6 +186,7 @@ void sendDataWs(AsyncWebSocketClient * client)
 // WLEDMM function to recover full-bright pixel (based on code from upstream alt-buffer, which is based on code from NeoPixelBrightnessBus)
 static uint32_t restoreColorLossy(uint32_t c, uint_fast8_t _restaurationBri) {
   if (_restaurationBri == 255) return c;
+  if (_restaurationBri == 0) return 0;
   uint8_t* chan = (uint8_t*) &c;
   for (uint_fast8_t i=0; i<4; i++) {
     uint_fast16_t val = chan[i];
@@ -311,4 +314,5 @@ void handleWs()
 #else
 void handleWs() {}
 void sendDataWs(AsyncWebSocketClient * client) {}
+#pragma message "WebSockets disabled - no live preview."
 #endif

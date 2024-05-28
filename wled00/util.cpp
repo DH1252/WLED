@@ -155,6 +155,7 @@ bool oappend(const char* txt)
       USER_PRINTF("%2u bytes \t\"", len /*1 + olen + len - SETTINGS_STACK_BUF_SIZE*/);
       USER_PRINT(txt);
       USER_PRINTLN(F("\""));
+      errorFlag = ERR_LOW_AJAX_MEM;
 	  }
     return false;        // buffer full
   }
@@ -204,7 +205,7 @@ bool requestJSONBufferLock(uint8_t module)
 {
   unsigned long now = millis();
 
-  while (jsonBufferLock && millis()-now < 1200) delay(1); // wait for fraction for buffer lock
+  while (jsonBufferLock && millis()-now < 1100) delay(1); // wait for fraction for buffer lock
 
   if (jsonBufferLock) {
     USER_PRINT(F("ERROR: Locking JSON buffer failed! (still locked by "));
@@ -239,9 +240,10 @@ uint8_t extractModeName(uint8_t mode, const char *src, char *dest, uint8_t maxLe
 {
   if (src == JSON_mode_names || src == nullptr) {
     if (mode < strip.getModeCount()) {
-      char lineBuffer[256];
+      char lineBuffer[256] = { '\0' };
       //strcpy_P(lineBuffer, (const char*)pgm_read_dword(&(WS2812FX::_modeData[mode])));
-      strcpy_P(lineBuffer, strip.getModeData(mode));
+      strncpy_P(lineBuffer, strip.getModeData(mode), sizeof(lineBuffer)/sizeof(char)-1);
+      lineBuffer[sizeof(lineBuffer)/sizeof(char)-1] = '\0'; // terminate string
       size_t len = strlen(lineBuffer);
       size_t j = 0;
       for (; j < maxLen && j < len; j++) {
@@ -251,6 +253,12 @@ uint8_t extractModeName(uint8_t mode, const char *src, char *dest, uint8_t maxLe
       dest[j] = 0; // terminate string
       return strlen(dest);
     } else return 0;
+  }
+
+  if (src == JSON_palette_names && mode > GRADIENT_PALETTE_COUNT) {
+    snprintf_P(dest, maxLen, PSTR("~ Custom %d~"), 255-mode);
+    dest[maxLen-1] = '\0';
+    return strlen(dest);
   }
 
   uint8_t qComma = 0;
@@ -363,9 +371,9 @@ uint8_t extractModeSlider(uint8_t mode, uint8_t slider, char *dest, uint8_t maxL
 int16_t extractModeDefaults(uint8_t mode, const char *segVar)
 {
   if (mode < strip.getModeCount()) {
-    char lineBuffer[128] = "";
-    strncpy_P(lineBuffer, strip.getModeData(mode), 127);
-    lineBuffer[127] = '\0'; // terminate string
+    char lineBuffer[256] = { '\0' };
+    strncpy_P(lineBuffer, strip.getModeData(mode), sizeof(lineBuffer)/sizeof(char)-1);
+    lineBuffer[sizeof(lineBuffer)/sizeof(char)-1] = '\0'; // terminate string
     if (lineBuffer[0] != 0) {
       char* startPtr = strrchr(lineBuffer, ';'); // last ";" in FX data
       if (!startPtr) return -1;
@@ -378,6 +386,16 @@ int16_t extractModeDefaults(uint8_t mode, const char *segVar)
     }
   }
   return -1;
+}
+
+
+void checkSettingsPIN(const char* pin) {
+  if (!pin) return;
+  if (!correctPIN && millis() - lastEditTime < PIN_RETRY_COOLDOWN) return; // guard against PIN brute force
+  bool correctBefore = correctPIN;
+  correctPIN = (strlen(settingsPIN) == 0 || strncmp(settingsPIN, pin, 4) == 0);
+  if (correctBefore != correctPIN) createEditHandler(correctPIN);
+  lastEditTime = millis();
 }
 
 
@@ -401,9 +419,9 @@ uint16_t crc16(const unsigned char* data_p, size_t length) {
 // (only 2 used as stored in 1 bit in segment options, consider switching to a single global simulation type)
 typedef enum UM_SoundSimulations {
   UMS_BeatSin = 0,
-  UMS_WeWillRockYou
-  //UMS_10_13,
-  //UMS_14_3
+  UMS_WeWillRockYou,
+  UMS_10_13,
+  UMS_14_3
 } um_soundSimulations_t;
 
 um_data_t* simulateSound(uint8_t simulationId)
@@ -416,6 +434,7 @@ um_data_t* simulateSound(uint8_t simulationId)
   static float    volumeSmth;
   static uint16_t volumeRaw;
   static float    my_magnitude;
+  static uint16_t zeroCrossingCount = 0; // number of zero crossings in the current batch of 512 samples
 
   //arrays
   uint8_t *fftResult;
@@ -430,7 +449,7 @@ um_data_t* simulateSound(uint8_t simulationId)
     // NOTE!!!
     // This may change as AudioReactive usermod may change
     um_data = new um_data_t;
-    um_data->u_size = 11;
+    um_data->u_size = 12;
     um_data->u_type = new um_types_t[um_data->u_size];
     um_data->u_data = new void*[um_data->u_size];
     um_data->u_data[0] = &volumeSmth;
@@ -444,6 +463,7 @@ um_data_t* simulateSound(uint8_t simulationId)
     um_data->u_data[8]  = &FFT_MajorPeak; // dummy (FFT Peak smoothed)
     um_data->u_data[9]  = &volumeSmth;    // dummy (soundPressure)
     um_data->u_data[10] = &volumeSmth;    // dummy (agcSensitivity)
+    um_data->u_data[11] = &zeroCrossingCount;
   } else {
     // get arrays from um_data
     fftResult =  (uint8_t*)um_data->u_data[2];
@@ -491,7 +511,7 @@ um_data_t* simulateSound(uint8_t simulationId)
           fftResult[i] = 0;
       }
       break;
-  /*case UMS_10_3:
+    case UMS_10_13:
       for (int i = 0; i<16; i++)
         fftResult[i] = inoise8(beatsin8(90 / (i+1), 0, 200)*15 + (ms>>10), ms>>3);
         volumeSmth = fftResult[8];
@@ -500,16 +520,17 @@ um_data_t* simulateSound(uint8_t simulationId)
       for (int i = 0; i<16; i++)
         fftResult[i] = inoise8(beatsin8(120 / (i+1), 10, 30)*10 + (ms>>14), ms>>3);
       volumeSmth = fftResult[8];
-      break;*/
+      break;
   }
 
   samplePeak    = random8() > 250;
-  FFT_MajorPeak = 21 + (volumeSmth*volumeSmth) / 8.0f; // WLEDMM 21hz...8200hz
+  FFT_MajorPeak = 21 + (volumeSmth*volumeSmth) / 8.0f; // walk thru full range of 21hz...8200hz
   maxVol        = 31;  // this gets feedback fro UI
   binNum        = 8;   // this gets feedback fro UI
   volumeRaw = volumeSmth;
   my_magnitude = 10000.0f / 8.0f; //no idea if 10000 is a good value for FFT_Magnitude ???
   if (volumeSmth < 1 ) my_magnitude = 0.001f;             // noise gate closed - mute
+  zeroCrossingCount = floorf(FFT_MajorPeak / 36.0f); // 9Khz max frequency => 255 zero crossings
 
   return um_data;
 }
@@ -543,6 +564,20 @@ CRGB getCRGBForBand(int x, uint8_t *fftResult, int pal) {
   }
 
   return value;
+}
+
+/*
+ * Returns a new, random color wheel index with a minimum distance of 42 from pos.
+ */
+uint8_t get_random_wheel_index(uint8_t pos) {
+  uint8_t r = 0, x = 0, y = 0, d = 0;
+  while (d < 42) {
+    r = random8();
+    x = abs(pos - r);
+    y = 255 - x;
+    d = MIN(x, y);
+  }
+  return r;
 }
 
 // WLEDMM extended "trim string" function to support enumerateLedmaps

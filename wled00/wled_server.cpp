@@ -58,6 +58,7 @@ void handleUpload(AsyncWebServerRequest *request, const String& filename, size_t
     request->_tempFile.close();
     USER_PRINT(F("File uploaded: "));  // WLEDMM
     USER_PRINTLN(filename);            // WLEDMM
+    invalidateFileNameCache();         // WLEDMM
     if (filename.equalsIgnoreCase("/cfg.json") || filename.equalsIgnoreCase("cfg.json")) { // WLEDMM
       request->send(200, "text/plain", F("Configuration restore successful.\nRebooting..."));
       doReboot = true;
@@ -220,6 +221,8 @@ void initServer()
 
     if (verboseResponse) {
       if (!isConfig) {
+        lastInterfaceUpdate = millis(); // prevent WS update until cooldown
+        interfaceUpdateCallMode = CALL_MODE_WS_SEND; // schedule WS update
         serveJson(request); return; //if JSON contains "v"
       } else {
         doSerializeConfig = true; //serializeConfig(); //Save new settings to FS
