@@ -260,7 +260,7 @@
 #define NUM_PWM_PINS(t) ((t) - 40) //for analog PWM 41-45 only
 #define IS_2PIN(t)      ((t) > 47)
 #define IS_VIRTUAL(t)        ( ((t) <= TYPE_RESERVED) || (((t) >= TYPE_NET_DDP_RGB) && ((t) < (TYPE_NET_DDP_RGB + 16))) ) // WLEDMM 80..95 are network "virtual" busses
-#define EXCLUDE_FROM_ABL(t)  ( IS_VIRTUAL(t) || ( (t) >= (TYPE_HUB75MATRIX + 10) && (t) < (TYPE_HUB75MATRIX + 10)))  // WLEDMM do not apply ato-brightness-limiter on these bus types 
+#define EXCLUDE_FROM_ABL(t)  ( IS_VIRTUAL(t) || ( (t) >= (TYPE_HUB75MATRIX) && (t) < (TYPE_HUB75MATRIX + 10)))  // WLEDMM do not apply auto-brightness-limiter on these bus types 
 
 //Color orders
 #define COL_ORDER_GRB             0           //GRB(w),defaut
@@ -357,6 +357,10 @@
 #define ERR_LOW_WS_MEM  35  // WLEDMM: low memory (ws)
 #define ERR_LOW_AJAX_MEM  36 // WLEDMM: low memory (oappend)
 #define ERR_LOW_BUF     37  // WLEDMM: low memory (LED buffer from allocLEDs)
+#define ERR_SYS_REBOOT  90  // WLEDMM: reboot after error
+#define ERR_SYS_BROWNOUT  91 // WLEDMM: reboot after brownout alert
+#define ERR_REBOOT_NEEDED 98 // WLEDMM: reboot needed after changing hardware setting
+#define ERR_POWEROFF_NEEDED 99 // WLEDMM: power-cycle needed after changing hardware setting
 
 // Timer mode types
 #define NL_MODE_SET               0            //After nightlight time elapsed, set to target brightness
@@ -391,7 +395,11 @@
 #define MAX_LEDS 1664 //can't rely on memory limit to limit this to 1600 LEDs
 #else
 //#define MAX_LEDS 8192
-#define MAX_LEDS 8464 // WLEDMM 92x92
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+  #define MAX_LEDS 8464 // WLEDMM 92x92 for esp32, esp32-S2 and esp32-c3
+#else
+  #define MAX_LEDS 18436 // WLEDMM 128x128 + 2048 + 4 for esp32-S3
+#endif
 #endif
 #endif
 

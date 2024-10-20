@@ -64,11 +64,11 @@ struct BusConfig {
     if ((type >= TYPE_NET_DDP_RGB) && (type < (TYPE_NET_DDP_RGB + 16))) nPins = 4;     // virtual network bus. 4 "pins" store IP address
     else if ((type > 47) && (type < 63)) nPins = 2;                                    // (data + clock / SPI) busses - two pins
     else if (IS_PWM(type)) nPins = NUM_PWM_PINS(type);                                 // PWM needs 1..5 pins
-    else if (type >= TYPE_HUB75MATRIX && type <= (TYPE_HUB75MATRIX + 10)) nPins = 0;   // HUB75 does not use LED pins
+    else if (type >= TYPE_HUB75MATRIX && type <= (TYPE_HUB75MATRIX + 10)) nPins = 1;   // HUB75 does not use LED pins, but we need to preserve the "chain length" parameter
     for (uint8_t i = 0; i < min(unsigned(nPins), sizeof(pins)/sizeof(pins[0])); i++) pins[i] = ppins[i];   //softhack007 fix for potential array out-of-bounds access
   }
 
-  //validates start and length and extends total if needed
+  //validates start and length and extends total if needed // WLEDMM this function is not used anywhere
   bool adjustBounds(uint16_t& total) {
     if (!count) count = 1;
     if (count > MAX_LEDS_PER_BUS) count = MAX_LEDS_PER_BUS;
@@ -135,6 +135,7 @@ class Bus {
     virtual void     setStatusPixel(uint32_t c) {}
     virtual void     setPixelColor(uint16_t pix, uint32_t c) = 0;
     virtual uint32_t getPixelColor(uint16_t pix) const { return 0; }
+    virtual uint32_t getPixelColorRestored(uint16_t pix) const { return restore_Color_Lossy(getPixelColor(pix), _bri); } // override in case your bus has a lossless buffer (HUB75, FastLED, Art-Net)
     virtual void     setBrightness(uint8_t b, bool immediate=false) { _bri = b; }
     virtual void     cleanup() = 0;
     virtual uint8_t  getPins(uint8_t* pinArray) const { return 0; }
@@ -182,6 +183,17 @@ class Bus {
     inline        uint8_t getAutoWhiteMode()          const { return _autoWhiteMode; }
     inline static void    setGlobalAWMode(uint8_t m)  { if (m < 5) _gAWM = m; else _gAWM = AW_GLOBAL_DISABLED; }
     inline static uint8_t getGlobalAWMode()           { return _gAWM; }
+
+    inline uint32_t restore_Color_Lossy(uint32_t c, uint8_t restoreBri) const { // shamelessly grabbed from upstream, who grabbed from NPB, who ..
+      if (restoreBri < 255) {
+        uint8_t* chan = (uint8_t*) &c;
+        for (uint_fast8_t i=0; i<4; i++) {
+          uint_fast16_t val = chan[i];
+          chan[i] = ((val << 8) + restoreBri) / (restoreBri + 1); //adding _bri slightly improves recovery / stops degradation on re-scale
+        }
+      }
+      return c;
+    }
 
     bool reversed = false;
 
@@ -296,6 +308,7 @@ class BusOnOff : public Bus {
     void setPixelColor(uint16_t pix, uint32_t c);
 
     uint32_t getPixelColor(uint16_t pix) const;
+    uint32_t getPixelColorRestored(uint16_t pix) const override { return getPixelColor(pix);}  // WLEDMM BusOnOff ignores brightness
 
     void show();
 
@@ -326,6 +339,7 @@ class BusNetwork : public Bus {
     void setPixelColor(uint16_t pix, uint32_t c);
 
     uint32_t __attribute__((pure)) getPixelColor(uint16_t pix) const;  // WLEDMM attribute added
+    uint32_t __attribute__((pure)) getPixelColorRestored(uint16_t pix) const override { return getPixelColor(pix);}  // WLEDMM BusNetwork ignores brightness
 
     void show();
 
@@ -367,13 +381,14 @@ class BusHub75Matrix : public Bus {
 
     void setPixelColor(uint16_t pix, uint32_t c) override;
     uint32_t getPixelColor(uint16_t pix) const override;
+    uint32_t getPixelColorRestored(uint16_t pix) const override; // lossless getPixelColor supported
 
     void show(void) override;
 
     void setBrightness(uint8_t b, bool immediate) override;
 
     uint8_t getPins(uint8_t* pinArray) const override {
-      pinArray[0] = mxconfig.chain_length;
+      pinArray[0] = activeMXconfig.chain_length;
       return 1;
     } // Fake value due to keep finaliseInit happy
 
@@ -386,12 +401,16 @@ class BusHub75Matrix : public Bus {
     }
 
   private:
-    MatrixPanel_I2S_DMA *display = nullptr;
-    VirtualMatrixPanel  *fourScanPanel = nullptr;
-    HUB75_I2S_CFG mxconfig;
     unsigned _panelWidth = 0;
     CRGB *_ledBuffer = nullptr;
     byte *_ledsDirty = nullptr;
+    // C++ dirty trick: private static variables are actually _not_ part of the class (however only visibile to class instances). 
+    // These variables persist when BusHub75Matrix gets deleted.
+    static MatrixPanel_I2S_DMA *activeDisplay;         // active display object
+    static VirtualMatrixPanel  *activeFourScanPanel;   // active fourScan object
+    static HUB75_I2S_CFG activeMXconfig;               // last used mxconfig
+    static uint8_t activeType;                         // last used type
+    static uint8_t instanceCount;                      // active instances - 0 or 1
 };
 #endif
 
@@ -418,6 +437,7 @@ class BusManager {
     void setSegmentCCT(int16_t cct, bool allowWBCorrection = false);
 
     uint32_t __attribute__((pure)) getPixelColor(uint_fast16_t pix); // WLEDMM attribute added
+    uint32_t __attribute__((pure)) getPixelColorRestored(uint_fast16_t pix);  // WLEDMM
 
     bool canAllShow() const;
 
